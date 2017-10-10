@@ -1,0 +1,108 @@
+From 5fb11a1d978cf1f517dd31c09de31341c5fb56b6 Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Tue, 4 Nov 2014 17:46:02 +0000
+Subject: [PATCH 013/153] drm/i915: Updated request structure tracing
+
+Added the '_complete' trace event which occurs when a fence/request is
+signaled as complete. Also moved the notify event from the IRQ handler
+code to inside the notify function itself.
+
+v3: Added the current ring seqno to the notify trace point.
+
+v5: Line wrapping to keep the style checker happy.
+
+For: VIZ-5190
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+---
+ drivers/gpu/drm/i915/i915_gem.c   |    9 +++++++--
+ drivers/gpu/drm/i915/i915_irq.c   |    2 --
+ drivers/gpu/drm/i915/i915_trace.h |   14 +++++++++-----
+ 3 files changed, 16 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 164e314..240337b 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2860,13 +2860,16 @@ void i915_gem_request_notify(struct intel_engine_cs *ring, bool fence_locked)
+ 	unsigned long flags;
+ 	u32 seqno;
+ 
+-	if (list_empty(&ring->fence_signal_list))
++	if (list_empty(&ring->fence_signal_list)) {
++		trace_i915_gem_request_notify(ring, 0);
+ 		return;
++	}
+ 
+ 	if (!fence_locked)
+ 		spin_lock_irqsave(&ring->fence_lock, flags);
+ 
+ 	seqno = ring->get_seqno(ring, false);
++	trace_i915_gem_request_notify(ring, seqno);
+ 
+ 	list_for_each_entry_safe(req, req_next, &ring->fence_signal_list, signal_link) {
+ 		if (!req->cancelled) {
+@@ -2880,8 +2883,10 @@ void i915_gem_request_notify(struct intel_engine_cs *ring, bool fence_locked)
+ 		 */
+ 		list_del_init(&req->signal_link);
+ 
+-		if (!req->cancelled)
++		if (!req->cancelled) {
+ 			fence_signal_locked(&req->fence);
++			trace_i915_gem_request_complete(req);
++		}
+ 
+ 		if (req->irq_enabled) {
+ 			req->ring->irq_put(req->ring);
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index cf4525a..1212094 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -981,8 +981,6 @@ static void notify_ring(struct intel_engine_cs *ring)
+ 	if (!intel_ring_initialized(ring))
+ 		return;
+ 
+-	trace_i915_gem_request_notify(ring);
+-
+ 	i915_gem_request_notify(ring, false);
+ 
+ 	wake_up_all(&ring->irq_queue);
+diff --git a/drivers/gpu/drm/i915/i915_trace.h b/drivers/gpu/drm/i915/i915_trace.h
+index 04fe849..b3ae894 100644
+--- a/drivers/gpu/drm/i915/i915_trace.h
++++ b/drivers/gpu/drm/i915/i915_trace.h
+@@ -561,23 +561,27 @@ DEFINE_EVENT(i915_gem_request, i915_gem_request_add,
+ );
+ 
+ TRACE_EVENT(i915_gem_request_notify,
+-	    TP_PROTO(struct intel_engine_cs *ring),
+-	    TP_ARGS(ring),
++	    TP_PROTO(struct intel_engine_cs *ring, uint32_t seqno),
++	    TP_ARGS(ring, seqno),
+ 
+ 	    TP_STRUCT__entry(
+ 			     __field(u32, dev)
+ 			     __field(u32, ring)
+ 			     __field(u32, seqno)
++			     __field(bool, is_empty)
+ 			     ),
+ 
+ 	    TP_fast_assign(
+ 			   __entry->dev = ring->dev->primary->index;
+ 			   __entry->ring = ring->id;
+-			   __entry->seqno = ring->get_seqno(ring, false);
++			   __entry->seqno = seqno;
++			   __entry->is_empty =
++					list_empty(&ring->fence_signal_list);
+ 			   ),
+ 
+-	    TP_printk("dev=%u, ring=%u, seqno=%u",
+-		      __entry->dev, __entry->ring, __entry->seqno)
++	    TP_printk("dev=%u, ring=%u, seqno=%u, empty=%d",
++		      __entry->dev, __entry->ring, __entry->seqno,
++		      __entry->is_empty)
+ );
+ 
+ DEFINE_EVENT(i915_gem_request, i915_gem_request_retire,
+-- 
+1.7.1
+

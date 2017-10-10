@@ -1,0 +1,31 @@
+From c5a8d63bb8dd8ebc645b383555e3a7336bde524c Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Tue, 29 Dec 2015 22:21:55 +0800
+Subject: [PATCH 062/153] [VPG]: drm/i915: change the default value for the scheduler parameters
+
+These values can achieve the best performance for the most cases.
+
+Conflicts:
+	drivers/gpu/drm/i915/i915_scheduler.c
+---
+ drivers/gpu/drm/i915/i915_scheduler.c |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.c b/drivers/gpu/drm/i915/i915_scheduler.c
+index 5baf499..5d2ed5b 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.c
++++ b/drivers/gpu/drm/i915/i915_scheduler.c
+@@ -191,8 +191,8 @@ int i915_scheduler_init(struct drm_device *dev)
+ 	scheduler->priority_level_max     = 1023;
+ 	scheduler->priority_level_bump    = 50;
+ 	scheduler->priority_level_preempt = 900;
+-	scheduler->min_flying             = 2;
+-	scheduler->file_queue_max         = 64;
++	scheduler->min_flying             = 5;
++	scheduler->file_queue_max         = 256;
+ 	scheduler->dump_flags             = I915_SF_DUMP_FORCE   |
+ 					    I915_SF_DUMP_DETAILS |
+ 					    I915_SF_DUMP_SEQNO   |
+-- 
+1.7.1
+

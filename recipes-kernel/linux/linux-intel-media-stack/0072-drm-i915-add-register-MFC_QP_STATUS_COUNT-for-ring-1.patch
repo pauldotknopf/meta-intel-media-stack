@@ -1,0 +1,36 @@
+From 7c8eb857142d020247376d10f924fc530d92b506 Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Mon, 16 Jun 2014 10:53:27 +0800
+Subject: [PATCH 072/153] drm/i915: add register MFC_QP_STATUS_COUNT for ring 1
+
+---
+ drivers/gpu/drm/i915/i915_cmd_parser.c |    1 +
+ drivers/gpu/drm/i915/i915_reg.h        |    1 +
+ 2 files changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_cmd_parser.c b/drivers/gpu/drm/i915/i915_cmd_parser.c
+index 5dfddbe..f3fd25c 100644
+--- a/drivers/gpu/drm/i915/i915_cmd_parser.c
++++ b/drivers/gpu/drm/i915/i915_cmd_parser.c
+@@ -515,6 +515,7 @@ static const struct drm_i915_reg_descriptor gen7_vcs_regs[] = {
+     REG32(MFC_BITSTREAM_SE_BITCOUNT_FRAME),
+     REG32(MFC_IMAGE_STATUS_MASK),
+     REG32(MFC_IMAGE_STATUS_CONTROL),
++	REG32(MFC_QP_STATUS_COUNT),
+ 	REG32(MFC_BITSTREAM_BYTECOUNT_SLICE),
+ };
+ 
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 3e525f6..81b9750 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -8158,5 +8158,6 @@ enum skl_disp_power_wells {
+ #define MFC_BITSTREAM_SE_BITCOUNT_FRAME 0x124A4
+ #define MFC_IMAGE_STATUS_MASK 0x124B4
+ #define MFC_IMAGE_STATUS_CONTROL 0x124B8
++#define MFC_QP_STATUS_COUNT      0x124BC
+ #define MFC_BITSTREAM_BYTECOUNT_SLICE 0x124D0
+ #endif /* _I915_REG_H_ */
+-- 
+1.7.1
+

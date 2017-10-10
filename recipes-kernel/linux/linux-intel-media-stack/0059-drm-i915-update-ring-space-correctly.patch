@@ -1,0 +1,41 @@
+From 9837bee8e506b5a0b721afe031435e23aed5cbe0 Mon Sep 17 00:00:00 2001
+From: Dave Gordon <david.s.gordon@intel.com>
+Date: Thu, 6 Aug 2015 16:50:46 +0100
+Subject: [PATCH 059/153] drm/i915: update ring space correctly
+
+For: VIZ-2021
+Signed-off-by: Dave Gordon <david.s.gordon@intel.com>
+---
+ drivers/gpu/drm/i915/intel_lrc.c        |    2 +-
+ drivers/gpu/drm/i915/intel_ringbuffer.c |    2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index ecdfa25..dfa02f4 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -748,7 +748,7 @@ static int logical_ring_wait_for_space(struct drm_i915_gem_request *req,
+ 	if (ret)
+ 		return ret;
+ 
+-	ringbuf->space = space;
++	intel_ring_update_space(ringbuf);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.c b/drivers/gpu/drm/i915/intel_ringbuffer.c
+index 12b8c6b..d17888b 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.c
+@@ -2218,7 +2218,7 @@ static int ring_wait_for_space(struct intel_engine_cs *ring, int n)
+ 	if (ret)
+ 		return ret;
+ 
+-	ringbuf->space = space;
++	intel_ring_update_space(ringbuf);
+ 	return 0;
+ }
+ 
+-- 
+1.7.1
+

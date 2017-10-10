@@ -1,0 +1,109 @@
+From 03f2ea20b8944491957e33311f4d213dd106da1d Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Thu, 21 Apr 2016 09:41:42 -0400
+Subject: [PATCH 116/153] [VPG]: drm/i915/skl: add slice shutdown debugfs interface
+
+Slice shutdown override interface for the application usage.
+---
+ drivers/gpu/drm/i915/i915_debugfs.c |   38 ++++++++++++++++++++++++++++++++++-
+ drivers/gpu/drm/i915/i915_dma.c     |    1 +
+ drivers/gpu/drm/i915/i915_drv.h     |    1 +
+ drivers/gpu/drm/i915/intel_lrc.c    |    2 +-
+ 4 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 5ba83fe..ff24b74 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -5697,6 +5697,41 @@ static const struct drm_info_list i915_debugfs_list[] = {
+ 	{"i915_rps_boost_info", i915_rps_boost_info, 0},
+ 	{"i915_ringstats", i915_ringstat_info, 0},
+ };
++
++static int
++i915_slice_enabled_get(void *data, u64 *val)
++{
++	struct drm_device *dev = data;
++	struct drm_i915_private *dev_priv = dev->dev_private;
++	struct intel_device_info *info;
++
++	info = (struct intel_device_info *)&dev_priv->info;
++	*val = (u64) (info->slice_enabled);
++	return 0;
++}
++
++static int
++i915_slice_enabled_set(void *data, u64 val)
++{
++	struct drm_device *dev = data;
++	struct drm_i915_private *dev_priv = dev->dev_private;
++	struct intel_device_info *info;
++
++	info = (struct intel_device_info *)&dev_priv->info;
++	if (!IS_SKYLAKE(dev) || !info->has_slice_pg)
++		return -EINVAL;
++
++	if (val > info->slice_total || val <= 0)
++		return -EINVAL;
++
++	info->slice_enabled = (u8)val;
++	return 0;
++}
++
++DEFINE_SIMPLE_ATTRIBUTE(i915_slice_enabled_fops,
++			i915_slice_enabled_get, i915_slice_enabled_set,
++			"%llu\n");
++
+ #define I915_DEBUGFS_ENTRIES ARRAY_SIZE(i915_debugfs_list)
+ 
+ static const struct i915_debugfs_files {
+@@ -5728,7 +5763,8 @@ static const struct i915_debugfs_files {
+ 	{"i915_dp_test_data", &i915_displayport_test_data_fops},
+ 	{"i915_dp_test_type", &i915_displayport_test_type_fops},
+ 	{"i915_dp_test_active", &i915_displayport_test_active_fops},
+-	{"i915_mvp_enable", &i915_mvp_enable_fops}
++	{"i915_mvp_enable", &i915_mvp_enable_fops},
++	{"i915_slice_enabled", &i915_slice_enabled_fops}
+ };
+ 
+ void intel_display_crc_init(struct drm_device *dev)
+diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
+index 61f485f..4eb95c0 100644
+--- a/drivers/gpu/drm/i915/i915_dma.c
++++ b/drivers/gpu/drm/i915/i915_dma.c
+@@ -830,6 +830,7 @@ static void intel_device_info_runtime_init(struct drm_device *dev)
+ 	else if (INTEL_INFO(dev)->gen >= 9)
+ 		gen9_sseu_info_init(dev);
+ 
++	info->slice_enabled = info->slice_total;
+ 	DRM_DEBUG_DRIVER("slice total: %u\n", info->slice_total);
+ 	DRM_DEBUG_DRIVER("subslice total: %u\n", info->subslice_total);
+ 	DRM_DEBUG_DRIVER("subslice per slice: %u\n", info->subslice_per_slice);
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index c347304..7999d98 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -819,6 +819,7 @@ struct intel_device_info {
+ 	u8 has_slice_pg:1;
+ 	u8 has_subslice_pg:1;
+ 	u8 has_eu_pg:1;
++	u8 slice_enabled;
+ };
+ 
+ #undef DEFINE_FLAG
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 6c9fd9e..4632f8b 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -2391,7 +2391,7 @@ make_rpcs(struct drm_device *dev)
+ 	*/
+ 	if (INTEL_INFO(dev)->has_slice_pg) {
+ 		rpcs |= GEN8_RPCS_S_CNT_ENABLE;
+-		rpcs |= INTEL_INFO(dev)->slice_total <<
++		rpcs |= INTEL_INFO(dev)->slice_enabled <<
+ 			GEN8_RPCS_S_CNT_SHIFT;
+ 		rpcs |= GEN8_RPCS_ENABLE;
+ 	}
+-- 
+1.7.1
+

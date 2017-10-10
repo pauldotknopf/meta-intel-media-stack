@@ -1,0 +1,28 @@
+From c1453eafc756d7a4cb993c7ec73e3aea46af9161 Mon Sep 17 00:00:00 2001
+From: xsang <oliver.sang@intel.com>
+Date: Tue, 12 Apr 2016 13:07:29 +0800
+Subject: [PATCH 113/153] [VPG]: drm/i915: Set PIN_ZONE_4G end to 4GB - 1M
+
+This is to fix HSD10033713. The 4k encode will have some artifacts
+for some frames if the PAK surface allocated exactly adjacent to 4G
+boundary.
+---
+ drivers/gpu/drm/i915/i915_gem.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index f694f97..896d5c2 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -4059,7 +4059,7 @@ i915_gem_object_bind_to_vm(struct drm_i915_gem_object *obj,
+ 	if (flags & PIN_MAPPABLE)
+ 		end = min_t(u64, end, dev_priv->gtt.mappable_end);
+ 	if (flags & PIN_ZONE_4G)
+-		end = min_t(u64, end, (1ULL << 32));
++		end = min_t(u64, end, ((1ULL << 32) - 0x100000));
+ 
+ 	if (alignment == 0)
+ 		alignment = flags & PIN_MAPPABLE ? fence_alignment :
+-- 
+1.7.1
+

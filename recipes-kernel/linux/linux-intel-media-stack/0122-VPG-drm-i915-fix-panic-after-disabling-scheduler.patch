@@ -1,0 +1,43 @@
+From b650c571d65612083c5265d4646f51162223c5ab Mon Sep 17 00:00:00 2001
+From: Hong Liu <hong.liu@intel.com>
+Date: Tue, 24 May 2016 09:43:04 +0800
+Subject: [PATCH 122/153] [VPG]: drm/i915: fix panic after disabling scheduler
+
+When scheduler is disabled, the req_link & ctx_link are all 0, which causes
+the panic when trying to delete it from list.
+
+Change-Id: Ie9ea67fd0ff57149a5efb95a8ebf7d1fb3f02fe0
+Signed-off-by: Hong Liu <hong.liu@intel.com>
+---
+ drivers/gpu/drm/i915/i915_gem_execbuffer.c |    1 +
+ drivers/gpu/drm/i915/i915_scheduler.c      |    2 +-
+ 2 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+index b06e0bd..ebaecd1 100644
+--- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+@@ -1771,6 +1771,7 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
+ 		qe.objs[i].obj       = obj;
+ 		if (obj)
+ 			qe.objs[i].read_only = obj->base.pending_write_domain == 0;
++		INIT_LIST_HEAD(&(qe.objs[i].req_link));
+ 
+ 	}
+ 	qe.num_objs = i;
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.c b/drivers/gpu/drm/i915/i915_scheduler.c
+index ea831fa..4670a27 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.c
++++ b/drivers/gpu/drm/i915/i915_scheduler.c
+@@ -1128,7 +1128,7 @@ void i915_scheduler_clean_node(struct i915_scheduler_queue_entry *node)
+ 
+ 	/* Context too: */
+ 	if (node->params.ctx) {
+-		hlist_del(&node->params.request->ctx_link);
++		hlist_del_init(&node->params.request->ctx_link);
+ 		i915_gem_context_unreference(node->params.ctx);
+ 		node->params.ctx = NULL;
+ 	}
+-- 
+1.7.1
+

@@ -1,0 +1,4047 @@
+From 73efae60c3670667fddf0c6ab030750057141f0e Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Thu, 15 Oct 2015 12:16:01 +0100
+Subject: [PATCH 052/153] staging/android/sync: Move sync framework out of staging
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The sync framework is now used by the i915 driver. Therefore it can be
+moved out of staging and into the regular tree. Also, the public
+interfaces can actually be made public and exported.
+
+v0.3: New patch for series.
+
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+Signed-off-by: Geoff Miller <geoff.miller@intel.com>
+Cc: Gustavo Padovan <gustavo.padovan@collabora.co.uk>
+Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Cc: Arve Hjønnevåg <arve@android.com>
+Cc: Riley Andrews <riandrews@android.com>
+---
+ drivers/android/Kconfig                |   28 ++
+ drivers/android/Makefile               |    2 +
+ drivers/android/sw_sync.c              |  260 +++++++++++
+ drivers/android/sw_sync.h              |   59 +++
+ drivers/android/sync.c                 |  734 ++++++++++++++++++++++++++++++++
+ drivers/android/sync.h                 |  366 ++++++++++++++++
+ drivers/android/sync_debug.c           |  255 +++++++++++
+ drivers/android/trace/sync.h           |   82 ++++
+ drivers/staging/android/Kconfig        |   28 --
+ drivers/staging/android/Makefile       |    2 -
+ drivers/staging/android/sw_sync.c      |  260 -----------
+ drivers/staging/android/sw_sync.h      |   59 ---
+ drivers/staging/android/sync.c         |  734 --------------------------------
+ drivers/staging/android/sync.h         |  366 ----------------
+ drivers/staging/android/sync_debug.c   |  255 -----------
+ drivers/staging/android/trace/sync.h   |   82 ----
+ drivers/staging/android/uapi/sw_sync.h |   32 --
+ drivers/staging/android/uapi/sync.h    |   97 -----
+ include/uapi/Kbuild                    |    1 +
+ include/uapi/sync/Kbuild               |    3 +
+ include/uapi/sync/sw_sync.h            |   32 ++
+ include/uapi/sync/sync.h               |   97 +++++
+ 22 files changed, 1919 insertions(+), 1915 deletions(-)
+ create mode 100644 drivers/android/sw_sync.c
+ create mode 100644 drivers/android/sw_sync.h
+ create mode 100644 drivers/android/sync.c
+ create mode 100644 drivers/android/sync.h
+ create mode 100644 drivers/android/sync_debug.c
+ create mode 100644 drivers/android/trace/sync.h
+ delete mode 100644 drivers/staging/android/sw_sync.c
+ delete mode 100644 drivers/staging/android/sw_sync.h
+ delete mode 100644 drivers/staging/android/sync.c
+ delete mode 100644 drivers/staging/android/sync.h
+ delete mode 100644 drivers/staging/android/sync_debug.c
+ delete mode 100644 drivers/staging/android/trace/sync.h
+ delete mode 100644 drivers/staging/android/uapi/sw_sync.h
+ delete mode 100644 drivers/staging/android/uapi/sync.h
+ create mode 100644 include/uapi/sync/Kbuild
+ create mode 100644 include/uapi/sync/sw_sync.h
+ create mode 100644 include/uapi/sync/sync.h
+
+diff --git a/drivers/android/Kconfig b/drivers/android/Kconfig
+index bdfc6c6..9edcd8f 100644
+--- a/drivers/android/Kconfig
++++ b/drivers/android/Kconfig
+@@ -32,6 +32,34 @@ config ANDROID_BINDER_IPC_32BIT
+ 
+ 	  Note that enabling this will break newer Android user-space.
+ 
++config SYNC
++	bool "Synchronization framework"
++	default n
++	select ANON_INODES
++	select DMA_SHARED_BUFFER
++	---help---
++	  This option enables the framework for synchronization between multiple
++	  drivers.  Sync implementations can take advantage of hardware
++	  synchronization built into devices like GPUs.
++
++config SW_SYNC
++	bool "Software synchronization objects"
++	default n
++	depends on SYNC
++	---help---
++	  A sync object driver that uses a 32bit counter to coordinate
++	  synchronization.  Useful when there is no hardware primitive backing
++	  the synchronization.
++
++config SW_SYNC_USER
++	bool "Userspace API for SW_SYNC"
++	default n
++	depends on SW_SYNC
++	---help---
++	  Provides a user space API to the sw sync object.
++	  *WARNING* improper use of this can result in deadlocking kernel
++	  drivers from userspace.
++
+ endif # if ANDROID
+ 
+ endmenu
+diff --git a/drivers/android/Makefile b/drivers/android/Makefile
+index 3b7e4b0..a1465dd 100644
+--- a/drivers/android/Makefile
++++ b/drivers/android/Makefile
+@@ -1,3 +1,5 @@
+ ccflags-y += -I$(src)			# needed for trace events
+ 
+ obj-$(CONFIG_ANDROID_BINDER_IPC)	+= binder.o
++obj-$(CONFIG_SYNC)			+= sync.o sync_debug.o
++obj-$(CONFIG_SW_SYNC)			+= sw_sync.o
+diff --git a/drivers/android/sw_sync.c b/drivers/android/sw_sync.c
+new file mode 100644
+index 0000000..c4ff167
+--- /dev/null
++++ b/drivers/android/sw_sync.c
+@@ -0,0 +1,260 @@
++/*
++ * drivers/base/sw_sync.c
++ *
++ * Copyright (C) 2012 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/export.h>
++#include <linux/file.h>
++#include <linux/fs.h>
++#include <linux/miscdevice.h>
++#include <linux/syscalls.h>
++#include <linux/uaccess.h>
++
++#include "sw_sync.h"
++
++static int sw_sync_cmp(u32 a, u32 b)
++{
++	if (a == b)
++		return 0;
++
++	return ((s32)a - (s32)b) < 0 ? -1 : 1;
++}
++
++struct sync_pt *sw_sync_pt_create(struct sw_sync_timeline *obj, u32 value)
++{
++	struct sw_sync_pt *pt;
++
++	pt = (struct sw_sync_pt *)
++		sync_pt_create(&obj->obj, sizeof(struct sw_sync_pt));
++
++	pt->value = value;
++
++	return (struct sync_pt *)pt;
++}
++EXPORT_SYMBOL(sw_sync_pt_create);
++
++static struct sync_pt *sw_sync_pt_dup(struct sync_pt *sync_pt)
++{
++	struct sw_sync_pt *pt = (struct sw_sync_pt *)sync_pt;
++	struct sw_sync_timeline *obj =
++		(struct sw_sync_timeline *)sync_pt_parent(sync_pt);
++
++	return (struct sync_pt *)sw_sync_pt_create(obj, pt->value);
++}
++
++static int sw_sync_pt_has_signaled(struct sync_pt *sync_pt)
++{
++	struct sw_sync_pt *pt = (struct sw_sync_pt *)sync_pt;
++	struct sw_sync_timeline *obj =
++		(struct sw_sync_timeline *)sync_pt_parent(sync_pt);
++
++	return sw_sync_cmp(obj->value, pt->value) >= 0;
++}
++
++static int sw_sync_pt_compare(struct sync_pt *a, struct sync_pt *b)
++{
++	struct sw_sync_pt *pt_a = (struct sw_sync_pt *)a;
++	struct sw_sync_pt *pt_b = (struct sw_sync_pt *)b;
++
++	return sw_sync_cmp(pt_a->value, pt_b->value);
++}
++
++static int sw_sync_fill_driver_data(struct sync_pt *sync_pt,
++				    void *data, int size)
++{
++	struct sw_sync_pt *pt = (struct sw_sync_pt *)sync_pt;
++
++	if (size < sizeof(pt->value))
++		return -ENOMEM;
++
++	memcpy(data, &pt->value, sizeof(pt->value));
++
++	return sizeof(pt->value);
++}
++
++static void sw_sync_timeline_value_str(struct sync_timeline *sync_timeline,
++				       char *str, int size)
++{
++	struct sw_sync_timeline *timeline =
++		(struct sw_sync_timeline *)sync_timeline;
++	snprintf(str, size, "%d", timeline->value);
++}
++
++static void sw_sync_pt_value_str(struct sync_pt *sync_pt,
++				 char *str, int size)
++{
++	struct sw_sync_pt *pt = (struct sw_sync_pt *)sync_pt;
++
++	snprintf(str, size, "%d", pt->value);
++}
++
++static struct sync_timeline_ops sw_sync_timeline_ops = {
++	.driver_name = "sw_sync",
++	.dup = sw_sync_pt_dup,
++	.has_signaled = sw_sync_pt_has_signaled,
++	.compare = sw_sync_pt_compare,
++	.fill_driver_data = sw_sync_fill_driver_data,
++	.timeline_value_str = sw_sync_timeline_value_str,
++	.pt_value_str = sw_sync_pt_value_str,
++};
++
++struct sw_sync_timeline *sw_sync_timeline_create(const char *name)
++{
++	struct sw_sync_timeline *obj = (struct sw_sync_timeline *)
++		sync_timeline_create(&sw_sync_timeline_ops,
++				     sizeof(struct sw_sync_timeline),
++				     name);
++
++	return obj;
++}
++EXPORT_SYMBOL(sw_sync_timeline_create);
++
++void sw_sync_timeline_inc(struct sw_sync_timeline *obj, u32 inc)
++{
++	obj->value += inc;
++
++	sync_timeline_signal(&obj->obj);
++}
++EXPORT_SYMBOL(sw_sync_timeline_inc);
++
++#ifdef CONFIG_SW_SYNC_USER
++/* *WARNING*
++ *
++ * improper use of this can result in deadlocking kernel drivers from userspace.
++ */
++
++/* opening sw_sync create a new sync obj */
++static int sw_sync_open(struct inode *inode, struct file *file)
++{
++	struct sw_sync_timeline *obj;
++	char task_comm[TASK_COMM_LEN];
++
++	get_task_comm(task_comm, current);
++
++	obj = sw_sync_timeline_create(task_comm);
++	if (!obj)
++		return -ENOMEM;
++
++	file->private_data = obj;
++
++	return 0;
++}
++
++static int sw_sync_release(struct inode *inode, struct file *file)
++{
++	struct sw_sync_timeline *obj = file->private_data;
++
++	sync_timeline_destroy(&obj->obj);
++	return 0;
++}
++
++static long sw_sync_ioctl_create_fence(struct sw_sync_timeline *obj,
++				       unsigned long arg)
++{
++	int fd = get_unused_fd_flags(O_CLOEXEC);
++	int err;
++	struct sync_pt *pt;
++	struct sync_fence *fence;
++	struct sw_sync_create_fence_data data;
++
++	if (fd < 0)
++		return fd;
++
++	if (copy_from_user(&data, (void __user *)arg, sizeof(data))) {
++		err = -EFAULT;
++		goto err;
++	}
++
++	pt = sw_sync_pt_create(obj, data.value);
++	if (!pt) {
++		err = -ENOMEM;
++		goto err;
++	}
++
++	data.name[sizeof(data.name) - 1] = '\0';
++	fence = sync_fence_create(data.name, pt);
++	if (!fence) {
++		sync_pt_free(pt);
++		err = -ENOMEM;
++		goto err;
++	}
++
++	data.fence = fd;
++	if (copy_to_user((void __user *)arg, &data, sizeof(data))) {
++		sync_fence_put(fence);
++		err = -EFAULT;
++		goto err;
++	}
++
++	sync_fence_install(fence, fd);
++
++	return 0;
++
++err:
++	put_unused_fd(fd);
++	return err;
++}
++
++static long sw_sync_ioctl_inc(struct sw_sync_timeline *obj, unsigned long arg)
++{
++	u32 value;
++
++	if (copy_from_user(&value, (void __user *)arg, sizeof(value)))
++		return -EFAULT;
++
++	sw_sync_timeline_inc(obj, value);
++
++	return 0;
++}
++
++static long sw_sync_ioctl(struct file *file, unsigned int cmd,
++			  unsigned long arg)
++{
++	struct sw_sync_timeline *obj = file->private_data;
++
++	switch (cmd) {
++	case SW_SYNC_IOC_CREATE_FENCE:
++		return sw_sync_ioctl_create_fence(obj, arg);
++
++	case SW_SYNC_IOC_INC:
++		return sw_sync_ioctl_inc(obj, arg);
++
++	default:
++		return -ENOTTY;
++	}
++}
++
++static const struct file_operations sw_sync_fops = {
++	.owner = THIS_MODULE,
++	.open = sw_sync_open,
++	.release = sw_sync_release,
++	.unlocked_ioctl = sw_sync_ioctl,
++	.compat_ioctl = sw_sync_ioctl,
++};
++
++static struct miscdevice sw_sync_dev = {
++	.minor	= MISC_DYNAMIC_MINOR,
++	.name	= "sw_sync",
++	.fops	= &sw_sync_fops,
++};
++
++static int __init sw_sync_device_init(void)
++{
++	return misc_register(&sw_sync_dev);
++}
++device_initcall(sw_sync_device_init);
++
++#endif /* CONFIG_SW_SYNC_USER */
+diff --git a/drivers/android/sw_sync.h b/drivers/android/sw_sync.h
+new file mode 100644
+index 0000000..4bf8b86
+--- /dev/null
++++ b/drivers/android/sw_sync.h
+@@ -0,0 +1,59 @@
++/*
++ * include/linux/sw_sync.h
++ *
++ * Copyright (C) 2012 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#ifndef _LINUX_SW_SYNC_H
++#define _LINUX_SW_SYNC_H
++
++#include <linux/types.h>
++#include <linux/kconfig.h>
++#include <uapi/sync/sw_sync.h>
++#include "sync.h"
++
++struct sw_sync_timeline {
++	struct	sync_timeline	obj;
++
++	u32			value;
++};
++
++struct sw_sync_pt {
++	struct sync_pt		pt;
++
++	u32			value;
++};
++
++#if IS_ENABLED(CONFIG_SW_SYNC)
++struct sw_sync_timeline *sw_sync_timeline_create(const char *name);
++void sw_sync_timeline_inc(struct sw_sync_timeline *obj, u32 inc);
++
++struct sync_pt *sw_sync_pt_create(struct sw_sync_timeline *obj, u32 value);
++#else
++static inline struct sw_sync_timeline *sw_sync_timeline_create(const char *name)
++{
++	return NULL;
++}
++
++static inline void sw_sync_timeline_inc(struct sw_sync_timeline *obj, u32 inc)
++{
++}
++
++static inline struct sync_pt *sw_sync_pt_create(struct sw_sync_timeline *obj,
++						u32 value)
++{
++	return NULL;
++}
++#endif /* IS_ENABLED(CONFIG_SW_SYNC) */
++
++#endif /* _LINUX_SW_SYNC_H */
+diff --git a/drivers/android/sync.c b/drivers/android/sync.c
+new file mode 100644
+index 0000000..7f0e919
+--- /dev/null
++++ b/drivers/android/sync.c
+@@ -0,0 +1,734 @@
++/*
++ * drivers/base/sync.c
++ *
++ * Copyright (C) 2012 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/debugfs.h>
++#include <linux/export.h>
++#include <linux/file.h>
++#include <linux/fs.h>
++#include <linux/kernel.h>
++#include <linux/poll.h>
++#include <linux/sched.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++#include <linux/anon_inodes.h>
++
++#include "sync.h"
++
++#define CREATE_TRACE_POINTS
++#include "trace/sync.h"
++
++static const struct fence_ops android_fence_ops;
++static const struct file_operations sync_fence_fops;
++
++struct sync_timeline *sync_timeline_create(const struct sync_timeline_ops *ops,
++					   int size, const char *name)
++{
++	struct sync_timeline *obj;
++
++	if (size < sizeof(struct sync_timeline))
++		return NULL;
++
++	obj = kzalloc(size, GFP_KERNEL);
++	if (obj == NULL)
++		return NULL;
++
++	kref_init(&obj->kref);
++	obj->ops = ops;
++	obj->context = fence_context_alloc(1);
++	strlcpy(obj->name, name, sizeof(obj->name));
++
++	INIT_LIST_HEAD(&obj->child_list_head);
++	INIT_LIST_HEAD(&obj->active_list_head);
++	spin_lock_init(&obj->child_list_lock);
++
++	sync_timeline_debug_add(obj);
++
++	return obj;
++}
++EXPORT_SYMBOL(sync_timeline_create);
++
++static void sync_timeline_free(struct kref *kref)
++{
++	struct sync_timeline *obj =
++		container_of(kref, struct sync_timeline, kref);
++
++	sync_timeline_debug_remove(obj);
++
++	if (obj->ops->release_obj)
++		obj->ops->release_obj(obj);
++
++	kfree(obj);
++}
++
++static void sync_timeline_get(struct sync_timeline *obj)
++{
++	kref_get(&obj->kref);
++}
++
++static void sync_timeline_put(struct sync_timeline *obj)
++{
++	kref_put(&obj->kref, sync_timeline_free);
++}
++
++void sync_timeline_destroy(struct sync_timeline *obj)
++{
++	obj->destroyed = true;
++	/*
++	 * Ensure timeline is marked as destroyed before
++	 * changing timeline's fences status.
++	 */
++	smp_wmb();
++
++	/*
++	 * signal any children that their parent is going away.
++	 */
++	sync_timeline_signal(obj);
++	sync_timeline_put(obj);
++}
++EXPORT_SYMBOL(sync_timeline_destroy);
++
++void sync_timeline_signal(struct sync_timeline *obj)
++{
++	unsigned long flags;
++	LIST_HEAD(signaled_pts);
++	struct sync_pt *pt, *next;
++
++	trace_sync_timeline(obj);
++
++	spin_lock_irqsave(&obj->child_list_lock, flags);
++
++	list_for_each_entry_safe(pt, next, &obj->active_list_head,
++				 active_list) {
++		if (fence_is_signaled_locked(&pt->base))
++			list_del_init(&pt->active_list);
++	}
++
++	spin_unlock_irqrestore(&obj->child_list_lock, flags);
++}
++EXPORT_SYMBOL(sync_timeline_signal);
++
++struct sync_pt *sync_pt_create(struct sync_timeline *obj, int size)
++{
++	unsigned long flags;
++	struct sync_pt *pt;
++
++	if (size < sizeof(struct sync_pt))
++		return NULL;
++
++	pt = kzalloc(size, GFP_KERNEL);
++	if (pt == NULL)
++		return NULL;
++
++	spin_lock_irqsave(&obj->child_list_lock, flags);
++	sync_timeline_get(obj);
++	fence_init(&pt->base, &android_fence_ops, &obj->child_list_lock,
++		   obj->context, ++obj->value);
++	list_add_tail(&pt->child_list, &obj->child_list_head);
++	INIT_LIST_HEAD(&pt->active_list);
++	spin_unlock_irqrestore(&obj->child_list_lock, flags);
++	return pt;
++}
++EXPORT_SYMBOL(sync_pt_create);
++
++void sync_pt_free(struct sync_pt *pt)
++{
++	fence_put(&pt->base);
++}
++EXPORT_SYMBOL(sync_pt_free);
++
++static struct sync_fence *sync_fence_alloc(int size, const char *name)
++{
++	struct sync_fence *fence;
++
++	fence = kzalloc(size, GFP_KERNEL);
++	if (fence == NULL)
++		return NULL;
++
++	fence->file = anon_inode_getfile("sync_fence", &sync_fence_fops,
++					 fence, 0);
++	if (IS_ERR(fence->file))
++		goto err;
++
++	kref_init(&fence->kref);
++	strlcpy(fence->name, name, sizeof(fence->name));
++
++	init_waitqueue_head(&fence->wq);
++
++	return fence;
++
++err:
++	kfree(fence);
++	return NULL;
++}
++
++static void fence_check_cb_func(struct fence *f, struct fence_cb *cb)
++{
++	struct sync_fence_cb *check;
++	struct sync_fence *fence;
++
++	check = container_of(cb, struct sync_fence_cb, cb);
++	fence = check->fence;
++
++	if (atomic_dec_and_test(&fence->status))
++		wake_up_all(&fence->wq);
++}
++
++/* TODO: implement a create which takes more that one sync_pt */
++struct sync_fence *sync_fence_create_dma(const char *name, struct fence *pt)
++{
++	struct sync_fence *fence;
++
++	fence = sync_fence_alloc(offsetof(struct sync_fence, cbs[1]), name);
++	if (fence == NULL)
++		return NULL;
++
++	fence->num_fences = 1;
++	atomic_set(&fence->status, 1);
++
++	fence->cbs[0].sync_pt = pt;
++	fence->cbs[0].fence = fence;
++	if (fence_add_callback(pt, &fence->cbs[0].cb, fence_check_cb_func))
++		atomic_dec(&fence->status);
++
++	sync_fence_debug_add(fence);
++
++	return fence;
++}
++EXPORT_SYMBOL(sync_fence_create_dma);
++
++struct sync_fence *sync_fence_create(const char *name, struct sync_pt *pt)
++{
++	return sync_fence_create_dma(name, &pt->base);
++}
++EXPORT_SYMBOL(sync_fence_create);
++
++struct sync_fence *sync_fence_fdget(int fd)
++{
++	struct file *file = fget(fd);
++
++	if (file == NULL)
++		return NULL;
++
++	if (file->f_op != &sync_fence_fops)
++		goto err;
++
++	return file->private_data;
++
++err:
++	fput(file);
++	return NULL;
++}
++EXPORT_SYMBOL(sync_fence_fdget);
++
++void sync_fence_put(struct sync_fence *fence)
++{
++	fput(fence->file);
++}
++EXPORT_SYMBOL(sync_fence_put);
++
++void sync_fence_install(struct sync_fence *fence, int fd)
++{
++	fd_install(fd, fence->file);
++}
++EXPORT_SYMBOL(sync_fence_install);
++
++static void sync_fence_add_pt(struct sync_fence *fence,
++			      int *i, struct fence *pt)
++{
++	fence->cbs[*i].sync_pt = pt;
++	fence->cbs[*i].fence = fence;
++
++	if (!fence_add_callback(pt, &fence->cbs[*i].cb, fence_check_cb_func)) {
++		fence_get(pt);
++		(*i)++;
++	}
++}
++
++struct sync_fence *sync_fence_merge(const char *name,
++				    struct sync_fence *a, struct sync_fence *b)
++{
++	int num_fences = a->num_fences + b->num_fences;
++	struct sync_fence *fence;
++	int i, i_a, i_b;
++	unsigned long size = offsetof(struct sync_fence, cbs[num_fences]);
++
++	fence = sync_fence_alloc(size, name);
++	if (fence == NULL)
++		return NULL;
++
++	atomic_set(&fence->status, num_fences);
++
++	/*
++	 * Assume sync_fence a and b are both ordered and have no
++	 * duplicates with the same context.
++	 *
++	 * If a sync_fence can only be created with sync_fence_merge
++	 * and sync_fence_create, this is a reasonable assumption.
++	 */
++	for (i = i_a = i_b = 0; i_a < a->num_fences && i_b < b->num_fences; ) {
++		struct fence *pt_a = a->cbs[i_a].sync_pt;
++		struct fence *pt_b = b->cbs[i_b].sync_pt;
++
++		if (pt_a->context < pt_b->context) {
++			sync_fence_add_pt(fence, &i, pt_a);
++
++			i_a++;
++		} else if (pt_a->context > pt_b->context) {
++			sync_fence_add_pt(fence, &i, pt_b);
++
++			i_b++;
++		} else {
++			if (pt_a->seqno - pt_b->seqno <= INT_MAX)
++				sync_fence_add_pt(fence, &i, pt_a);
++			else
++				sync_fence_add_pt(fence, &i, pt_b);
++
++			i_a++;
++			i_b++;
++		}
++	}
++
++	for (; i_a < a->num_fences; i_a++)
++		sync_fence_add_pt(fence, &i, a->cbs[i_a].sync_pt);
++
++	for (; i_b < b->num_fences; i_b++)
++		sync_fence_add_pt(fence, &i, b->cbs[i_b].sync_pt);
++
++	if (num_fences > i)
++		atomic_sub(num_fences - i, &fence->status);
++	fence->num_fences = i;
++
++	sync_fence_debug_add(fence);
++	return fence;
++}
++EXPORT_SYMBOL(sync_fence_merge);
++
++int sync_fence_wake_up_wq(wait_queue_t *curr, unsigned mode,
++				 int wake_flags, void *key)
++{
++	struct sync_fence_waiter *wait;
++
++	wait = container_of(curr, struct sync_fence_waiter, work);
++	list_del_init(&wait->work.task_list);
++
++	wait->callback(wait->work.private, wait);
++	return 1;
++}
++
++int sync_fence_wait_async(struct sync_fence *fence,
++			  struct sync_fence_waiter *waiter)
++{
++	int err = atomic_read(&fence->status);
++	unsigned long flags;
++
++	if (err < 0)
++		return err;
++
++	if (!err)
++		return 1;
++
++	init_waitqueue_func_entry(&waiter->work, sync_fence_wake_up_wq);
++	waiter->work.private = fence;
++
++	spin_lock_irqsave(&fence->wq.lock, flags);
++	err = atomic_read(&fence->status);
++	if (err > 0)
++		__add_wait_queue_tail(&fence->wq, &waiter->work);
++	spin_unlock_irqrestore(&fence->wq.lock, flags);
++
++	if (err < 0)
++		return err;
++
++	return !err;
++}
++EXPORT_SYMBOL(sync_fence_wait_async);
++
++int sync_fence_cancel_async(struct sync_fence *fence,
++			     struct sync_fence_waiter *waiter)
++{
++	unsigned long flags;
++	int ret = 0;
++
++	spin_lock_irqsave(&fence->wq.lock, flags);
++	if (!list_empty(&waiter->work.task_list))
++		list_del_init(&waiter->work.task_list);
++	else
++		ret = -ENOENT;
++	spin_unlock_irqrestore(&fence->wq.lock, flags);
++	return ret;
++}
++EXPORT_SYMBOL(sync_fence_cancel_async);
++
++int sync_fence_wait(struct sync_fence *fence, long timeout)
++{
++	long ret;
++	int i;
++
++	if (timeout < 0)
++		timeout = MAX_SCHEDULE_TIMEOUT;
++	else
++		timeout = msecs_to_jiffies(timeout);
++
++	trace_sync_wait(fence, 1);
++	for (i = 0; i < fence->num_fences; ++i)
++		trace_sync_pt(fence->cbs[i].sync_pt);
++	ret = wait_event_interruptible_timeout(fence->wq,
++					       atomic_read(&fence->status) <= 0,
++					       timeout);
++	trace_sync_wait(fence, 0);
++
++	if (ret < 0) {
++		return ret;
++	} else if (ret == 0) {
++		if (timeout) {
++			pr_info("fence timeout on [%p] after %dms\n", fence,
++				jiffies_to_msecs(timeout));
++			sync_dump();
++		}
++		return -ETIME;
++	}
++
++	ret = atomic_read(&fence->status);
++	if (ret) {
++		pr_info("fence error %ld on [%p]\n", ret, fence);
++		sync_dump();
++	}
++	return ret;
++}
++EXPORT_SYMBOL(sync_fence_wait);
++
++static const char *android_fence_get_driver_name(struct fence *fence)
++{
++	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
++	struct sync_timeline *parent = sync_pt_parent(pt);
++
++	return parent->ops->driver_name;
++}
++
++static const char *android_fence_get_timeline_name(struct fence *fence)
++{
++	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
++	struct sync_timeline *parent = sync_pt_parent(pt);
++
++	return parent->name;
++}
++
++static void android_fence_release(struct fence *fence)
++{
++	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
++	struct sync_timeline *parent = sync_pt_parent(pt);
++	unsigned long flags;
++
++	spin_lock_irqsave(fence->lock, flags);
++	list_del(&pt->child_list);
++	if (WARN_ON_ONCE(!list_empty(&pt->active_list)))
++		list_del(&pt->active_list);
++	spin_unlock_irqrestore(fence->lock, flags);
++
++	if (parent->ops->free_pt)
++		parent->ops->free_pt(pt);
++
++	sync_timeline_put(parent);
++	fence_free(&pt->base);
++}
++
++static bool android_fence_signaled(struct fence *fence)
++{
++	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
++	struct sync_timeline *parent = sync_pt_parent(pt);
++	int ret;
++
++	ret = parent->ops->has_signaled(pt);
++	if (ret < 0)
++		fence->status = ret;
++	return ret;
++}
++
++static bool android_fence_enable_signaling(struct fence *fence)
++{
++	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
++	struct sync_timeline *parent = sync_pt_parent(pt);
++
++	if (android_fence_signaled(fence))
++		return false;
++
++	list_add_tail(&pt->active_list, &parent->active_list_head);
++	return true;
++}
++
++static int android_fence_fill_driver_data(struct fence *fence,
++					  void *data, int size)
++{
++	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
++	struct sync_timeline *parent = sync_pt_parent(pt);
++
++	if (!parent->ops->fill_driver_data)
++		return 0;
++	return parent->ops->fill_driver_data(pt, data, size);
++}
++
++static void android_fence_value_str(struct fence *fence,
++				    char *str, int size)
++{
++	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
++	struct sync_timeline *parent = sync_pt_parent(pt);
++
++	if (!parent->ops->pt_value_str) {
++		if (size)
++			*str = 0;
++		return;
++	}
++	parent->ops->pt_value_str(pt, str, size);
++}
++
++static void android_fence_timeline_value_str(struct fence *fence,
++					     char *str, int size)
++{
++	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
++	struct sync_timeline *parent = sync_pt_parent(pt);
++
++	if (!parent->ops->timeline_value_str) {
++		if (size)
++			*str = 0;
++		return;
++	}
++	parent->ops->timeline_value_str(parent, str, size);
++}
++
++static const struct fence_ops android_fence_ops = {
++	.get_driver_name = android_fence_get_driver_name,
++	.get_timeline_name = android_fence_get_timeline_name,
++	.enable_signaling = android_fence_enable_signaling,
++	.signaled = android_fence_signaled,
++	.wait = fence_default_wait,
++	.release = android_fence_release,
++	.fill_driver_data = android_fence_fill_driver_data,
++	.fence_value_str = android_fence_value_str,
++	.timeline_value_str = android_fence_timeline_value_str,
++};
++
++static void sync_fence_free(struct kref *kref)
++{
++	struct sync_fence *fence = container_of(kref, struct sync_fence, kref);
++	int i, status = atomic_read(&fence->status);
++
++	for (i = 0; i < fence->num_fences; ++i) {
++		if (status)
++			fence_remove_callback(fence->cbs[i].sync_pt,
++					      &fence->cbs[i].cb);
++		fence_put(fence->cbs[i].sync_pt);
++	}
++
++	kfree(fence);
++}
++
++static int sync_fence_release(struct inode *inode, struct file *file)
++{
++	struct sync_fence *fence = file->private_data;
++
++	sync_fence_debug_remove(fence);
++
++	kref_put(&fence->kref, sync_fence_free);
++	return 0;
++}
++
++static unsigned int sync_fence_poll(struct file *file, poll_table *wait)
++{
++	struct sync_fence *fence = file->private_data;
++	int status;
++
++	poll_wait(file, &fence->wq, wait);
++
++	status = atomic_read(&fence->status);
++
++	if (!status)
++		return POLLIN;
++	else if (status < 0)
++		return POLLERR;
++	return 0;
++}
++
++static long sync_fence_ioctl_wait(struct sync_fence *fence, unsigned long arg)
++{
++	__s32 value;
++
++	if (copy_from_user(&value, (void __user *)arg, sizeof(value)))
++		return -EFAULT;
++
++	return sync_fence_wait(fence, value);
++}
++
++static long sync_fence_ioctl_merge(struct sync_fence *fence, unsigned long arg)
++{
++	int fd = get_unused_fd_flags(O_CLOEXEC);
++	int err;
++	struct sync_fence *fence2, *fence3;
++	struct sync_merge_data data;
++
++	if (fd < 0)
++		return fd;
++
++	if (copy_from_user(&data, (void __user *)arg, sizeof(data))) {
++		err = -EFAULT;
++		goto err_put_fd;
++	}
++
++	fence2 = sync_fence_fdget(data.fd2);
++	if (fence2 == NULL) {
++		err = -ENOENT;
++		goto err_put_fd;
++	}
++
++	data.name[sizeof(data.name) - 1] = '\0';
++	fence3 = sync_fence_merge(data.name, fence, fence2);
++	if (fence3 == NULL) {
++		err = -ENOMEM;
++		goto err_put_fence2;
++	}
++
++	data.fence = fd;
++	if (copy_to_user((void __user *)arg, &data, sizeof(data))) {
++		err = -EFAULT;
++		goto err_put_fence3;
++	}
++
++	sync_fence_install(fence3, fd);
++	sync_fence_put(fence2);
++	return 0;
++
++err_put_fence3:
++	sync_fence_put(fence3);
++
++err_put_fence2:
++	sync_fence_put(fence2);
++
++err_put_fd:
++	put_unused_fd(fd);
++	return err;
++}
++
++static int sync_fill_pt_info(struct fence *fence, void *data, int size)
++{
++	struct sync_pt_info *info = data;
++	int ret;
++
++	if (size < sizeof(struct sync_pt_info))
++		return -ENOMEM;
++
++	info->len = sizeof(struct sync_pt_info);
++
++	if (fence->ops->fill_driver_data) {
++		ret = fence->ops->fill_driver_data(fence, info->driver_data,
++						   size - sizeof(*info));
++		if (ret < 0)
++			return ret;
++
++		info->len += ret;
++	}
++
++	strlcpy(info->obj_name, fence->ops->get_timeline_name(fence),
++		sizeof(info->obj_name));
++	strlcpy(info->driver_name, fence->ops->get_driver_name(fence),
++		sizeof(info->driver_name));
++	if (fence_is_signaled(fence))
++		info->status = fence->status >= 0 ? 1 : fence->status;
++	else
++		info->status = 0;
++	info->timestamp_ns = ktime_to_ns(fence->timestamp);
++
++	return info->len;
++}
++
++static long sync_fence_ioctl_fence_info(struct sync_fence *fence,
++					unsigned long arg)
++{
++	struct sync_fence_info_data *data;
++	__u32 size;
++	__u32 len = 0;
++	int ret, i;
++
++	if (copy_from_user(&size, (void __user *)arg, sizeof(size)))
++		return -EFAULT;
++
++	if (size < sizeof(struct sync_fence_info_data))
++		return -EINVAL;
++
++	if (size > 4096)
++		size = 4096;
++
++	data = kzalloc(size, GFP_KERNEL);
++	if (data == NULL)
++		return -ENOMEM;
++
++	strlcpy(data->name, fence->name, sizeof(data->name));
++	data->status = atomic_read(&fence->status);
++	if (data->status >= 0)
++		data->status = !data->status;
++
++	len = sizeof(struct sync_fence_info_data);
++
++	for (i = 0; i < fence->num_fences; ++i) {
++		struct fence *pt = fence->cbs[i].sync_pt;
++
++		ret = sync_fill_pt_info(pt, (u8 *)data + len, size - len);
++
++		if (ret < 0)
++			goto out;
++
++		len += ret;
++	}
++
++	data->len = len;
++
++	if (copy_to_user((void __user *)arg, data, len))
++		ret = -EFAULT;
++	else
++		ret = 0;
++
++out:
++	kfree(data);
++
++	return ret;
++}
++
++static long sync_fence_ioctl(struct file *file, unsigned int cmd,
++			     unsigned long arg)
++{
++	struct sync_fence *fence = file->private_data;
++
++	switch (cmd) {
++	case SYNC_IOC_WAIT:
++		return sync_fence_ioctl_wait(fence, arg);
++
++	case SYNC_IOC_MERGE:
++		return sync_fence_ioctl_merge(fence, arg);
++
++	case SYNC_IOC_FENCE_INFO:
++		return sync_fence_ioctl_fence_info(fence, arg);
++
++	default:
++		return -ENOTTY;
++	}
++}
++
++static const struct file_operations sync_fence_fops = {
++	.release = sync_fence_release,
++	.poll = sync_fence_poll,
++	.unlocked_ioctl = sync_fence_ioctl,
++	.compat_ioctl = sync_fence_ioctl,
++};
++
+diff --git a/drivers/android/sync.h b/drivers/android/sync.h
+new file mode 100644
+index 0000000..4ccff01
+--- /dev/null
++++ b/drivers/android/sync.h
+@@ -0,0 +1,366 @@
++/*
++ * include/linux/sync.h
++ *
++ * Copyright (C) 2012 Google, Inc.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#ifndef _LINUX_SYNC_H
++#define _LINUX_SYNC_H
++
++#include <linux/types.h>
++#include <linux/kref.h>
++#include <linux/ktime.h>
++#include <linux/list.h>
++#include <linux/spinlock.h>
++#include <linux/wait.h>
++#include <linux/fence.h>
++
++#include <uapi/sync/sync.h>
++
++struct sync_timeline;
++struct sync_pt;
++struct sync_fence;
++
++/**
++ * struct sync_timeline_ops - sync object implementation ops
++ * @driver_name:	name of the implementation
++ * @dup:		duplicate a sync_pt
++ * @has_signaled:	returns:
++ *			  1 if pt has signaled
++ *			  0 if pt has not signaled
++ *			 <0 on error
++ * @compare:		returns:
++ *			  1 if b will signal before a
++ *			  0 if a and b will signal at the same time
++ *			 -1 if a will signal before b
++ * @free_pt:		called before sync_pt is freed
++ * @release_obj:	called before sync_timeline is freed
++ * @fill_driver_data:	write implementation specific driver data to data.
++ *			  should return an error if there is not enough room
++ *			  as specified by size.  This information is returned
++ *			  to userspace by SYNC_IOC_FENCE_INFO.
++ * @timeline_value_str: fill str with the value of the sync_timeline's counter
++ * @pt_value_str:	fill str with the value of the sync_pt
++ */
++struct sync_timeline_ops {
++	const char *driver_name;
++
++	/* required */
++	struct sync_pt * (*dup)(struct sync_pt *pt);
++
++	/* required */
++	int (*has_signaled)(struct sync_pt *pt);
++
++	/* required */
++	int (*compare)(struct sync_pt *a, struct sync_pt *b);
++
++	/* optional */
++	void (*free_pt)(struct sync_pt *sync_pt);
++
++	/* optional */
++	void (*release_obj)(struct sync_timeline *sync_timeline);
++
++	/* optional */
++	int (*fill_driver_data)(struct sync_pt *syncpt, void *data, int size);
++
++	/* optional */
++	void (*timeline_value_str)(struct sync_timeline *timeline, char *str,
++				   int size);
++
++	/* optional */
++	void (*pt_value_str)(struct sync_pt *pt, char *str, int size);
++};
++
++/**
++ * struct sync_timeline - sync object
++ * @kref:		reference count on fence.
++ * @ops:		ops that define the implementation of the sync_timeline
++ * @name:		name of the sync_timeline. Useful for debugging
++ * @destroyed:		set when sync_timeline is destroyed
++ * @child_list_head:	list of children sync_pts for this sync_timeline
++ * @child_list_lock:	lock protecting @child_list_head, destroyed, and
++ *			  sync_pt.status
++ * @active_list_head:	list of active (unsignaled/errored) sync_pts
++ * @sync_timeline_list:	membership in global sync_timeline_list
++ */
++struct sync_timeline {
++	struct kref		kref;
++	const struct sync_timeline_ops	*ops;
++	char			name[32];
++
++	/* protected by child_list_lock */
++	bool			destroyed;
++	int			context, value;
++
++	struct list_head	child_list_head;
++	spinlock_t		child_list_lock;
++
++	struct list_head	active_list_head;
++
++#ifdef CONFIG_DEBUG_FS
++	struct list_head	sync_timeline_list;
++#endif
++};
++
++/**
++ * struct sync_pt - sync point
++ * @fence:		base fence class
++ * @child_list:		membership in sync_timeline.child_list_head
++ * @active_list:	membership in sync_timeline.active_list_head
++ * @signaled_list:	membership in temporary signaled_list on stack
++ * @fence:		sync_fence to which the sync_pt belongs
++ * @pt_list:		membership in sync_fence.pt_list_head
++ * @status:		1: signaled, 0:active, <0: error
++ * @timestamp:		time which sync_pt status transitioned from active to
++ *			  signaled or error.
++ */
++struct sync_pt {
++	struct fence base;
++
++	struct list_head	child_list;
++	struct list_head	active_list;
++};
++
++static inline struct sync_timeline *sync_pt_parent(struct sync_pt *pt)
++{
++	return container_of(pt->base.lock, struct sync_timeline,
++			    child_list_lock);
++}
++
++struct sync_fence_cb {
++	struct fence_cb cb;
++	struct fence *sync_pt;
++	struct sync_fence *fence;
++};
++
++/**
++ * struct sync_fence - sync fence
++ * @file:		file representing this fence
++ * @kref:		reference count on fence.
++ * @name:		name of sync_fence.  Useful for debugging
++ * @pt_list_head:	list of sync_pts in the fence.  immutable once fence
++ *			  is created
++ * @status:		0: signaled, >0:active, <0: error
++ *
++ * @wq:			wait queue for fence signaling
++ * @sync_fence_list:	membership in global fence list
++ */
++struct sync_fence {
++	struct file		*file;
++	struct kref		kref;
++	char			name[32];
++#ifdef CONFIG_DEBUG_FS
++	struct list_head	sync_fence_list;
++#endif
++	int num_fences;
++
++	wait_queue_head_t	wq;
++	atomic_t		status;
++
++	struct sync_fence_cb	cbs[];
++};
++
++struct sync_fence_waiter;
++typedef void (*sync_callback_t)(struct sync_fence *fence,
++				struct sync_fence_waiter *waiter);
++
++/**
++ * struct sync_fence_waiter - metadata for asynchronous waiter on a fence
++ * @waiter_list:	membership in sync_fence.waiter_list_head
++ * @callback:		function pointer to call when fence signals
++ * @callback_data:	pointer to pass to @callback
++ */
++struct sync_fence_waiter {
++	wait_queue_t work;
++	sync_callback_t callback;
++};
++
++static inline void sync_fence_waiter_init(struct sync_fence_waiter *waiter,
++					  sync_callback_t callback)
++{
++	INIT_LIST_HEAD(&waiter->work.task_list);
++	waiter->callback = callback;
++}
++
++/*
++ * API for sync_timeline implementers
++ */
++
++/**
++ * sync_timeline_create() - creates a sync object
++ * @ops:	specifies the implementation ops for the object
++ * @size:	size to allocate for this obj
++ * @name:	sync_timeline name
++ *
++ * Creates a new sync_timeline which will use the implementation specified by
++ * @ops.  @size bytes will be allocated allowing for implementation specific
++ * data to be kept after the generic sync_timeline struct.
++ */
++struct sync_timeline *sync_timeline_create(const struct sync_timeline_ops *ops,
++					   int size, const char *name);
++
++/**
++ * sync_timeline_destroy() - destroys a sync object
++ * @obj:	sync_timeline to destroy
++ *
++ * A sync implementation should call this when the @obj is going away
++ * (i.e. module unload.)  @obj won't actually be freed until all its children
++ * sync_pts are freed.
++ */
++void sync_timeline_destroy(struct sync_timeline *obj);
++
++/**
++ * sync_timeline_signal() - signal a status change on a sync_timeline
++ * @obj:	sync_timeline to signal
++ *
++ * A sync implementation should call this any time one of it's sync_pts
++ * has signaled or has an error condition.
++ */
++void sync_timeline_signal(struct sync_timeline *obj);
++
++/**
++ * sync_pt_create() - creates a sync pt
++ * @parent:	sync_pt's parent sync_timeline
++ * @size:	size to allocate for this pt
++ *
++ * Creates a new sync_pt as a child of @parent.  @size bytes will be
++ * allocated allowing for implementation specific data to be kept after
++ * the generic sync_timeline struct.
++ */
++struct sync_pt *sync_pt_create(struct sync_timeline *parent, int size);
++
++/**
++ * sync_pt_free() - frees a sync pt
++ * @pt:		sync_pt to free
++ *
++ * This should only be called on sync_pts which have been created but
++ * not added to a fence.
++ */
++void sync_pt_free(struct sync_pt *pt);
++
++/**
++ * sync_fence_create() - creates a sync fence
++ * @name:	name of fence to create
++ * @pt:		sync_pt to add to the fence
++ *
++ * Creates a fence containg @pt.  Once this is called, the fence takes
++ * ownership of @pt.
++ */
++struct sync_fence *sync_fence_create(const char *name, struct sync_pt *pt);
++
++/**
++ * sync_fence_create_dma() - creates a sync fence from dma-fence
++ * @name:	name of fence to create
++ * @pt:	dma-fence to add to the fence
++ *
++ * Creates a fence containg @pt.  Once this is called, the fence takes
++ * ownership of @pt.
++ */
++struct sync_fence *sync_fence_create_dma(const char *name, struct fence *pt);
++
++/*
++ * API for sync_fence consumers
++ */
++
++/**
++ * sync_fence_merge() - merge two fences
++ * @name:	name of new fence
++ * @a:		fence a
++ * @b:		fence b
++ *
++ * Creates a new fence which contains copies of all the sync_pts in both
++ * @a and @b.  @a and @b remain valid, independent fences.
++ */
++struct sync_fence *sync_fence_merge(const char *name,
++				    struct sync_fence *a, struct sync_fence *b);
++
++/**
++ * sync_fence_fdget() - get a fence from an fd
++ * @fd:		fd referencing a fence
++ *
++ * Ensures @fd references a valid fence, increments the refcount of the backing
++ * file, and returns the fence.
++ */
++struct sync_fence *sync_fence_fdget(int fd);
++
++/**
++ * sync_fence_put() - puts a reference of a sync fence
++ * @fence:	fence to put
++ *
++ * Puts a reference on @fence.  If this is the last reference, the fence and
++ * all it's sync_pts will be freed
++ */
++void sync_fence_put(struct sync_fence *fence);
++
++/**
++ * sync_fence_install() - installs a fence into a file descriptor
++ * @fence:	fence to install
++ * @fd:		file descriptor in which to install the fence
++ *
++ * Installs @fence into @fd.  @fd's should be acquired through
++ * get_unused_fd_flags(O_CLOEXEC).
++ */
++void sync_fence_install(struct sync_fence *fence, int fd);
++
++/**
++ * sync_fence_wait_async() - registers and async wait on the fence
++ * @fence:		fence to wait on
++ * @waiter:		waiter callback struck
++ *
++ * Returns 1 if @fence has already signaled.
++ *
++ * Registers a callback to be called when @fence signals or has an error.
++ * @waiter should be initialized with sync_fence_waiter_init().
++ */
++int sync_fence_wait_async(struct sync_fence *fence,
++			  struct sync_fence_waiter *waiter);
++
++/**
++ * sync_fence_cancel_async() - cancels an async wait
++ * @fence:		fence to wait on
++ * @waiter:		waiter callback struck
++ *
++ * returns 0 if waiter was removed from fence's async waiter list.
++ * returns -ENOENT if waiter was not found on fence's async waiter list.
++ *
++ * Cancels a previously registered async wait.  Will fail gracefully if
++ * @waiter was never registered or if @fence has already signaled @waiter.
++ */
++int sync_fence_cancel_async(struct sync_fence *fence,
++			    struct sync_fence_waiter *waiter);
++
++/**
++ * sync_fence_wait() - wait on fence
++ * @fence:	fence to wait on
++ * @tiemout:	timeout in ms
++ *
++ * Wait for @fence to be signaled or have an error.  Waits indefinitely
++ * if @timeout < 0
++ */
++int sync_fence_wait(struct sync_fence *fence, long timeout);
++
++#ifdef CONFIG_DEBUG_FS
++
++void sync_timeline_debug_add(struct sync_timeline *obj);
++void sync_timeline_debug_remove(struct sync_timeline *obj);
++void sync_fence_debug_add(struct sync_fence *fence);
++void sync_fence_debug_remove(struct sync_fence *fence);
++void sync_dump(void);
++
++#else
++# define sync_timeline_debug_add(obj)
++# define sync_timeline_debug_remove(obj)
++# define sync_fence_debug_add(fence)
++# define sync_fence_debug_remove(fence)
++# define sync_dump()
++#endif
++int sync_fence_wake_up_wq(wait_queue_t *curr, unsigned mode,
++				 int wake_flags, void *key);
++
++#endif /* _LINUX_SYNC_H */
+diff --git a/drivers/android/sync_debug.c b/drivers/android/sync_debug.c
+new file mode 100644
+index 0000000..02a1649
+--- /dev/null
++++ b/drivers/android/sync_debug.c
+@@ -0,0 +1,255 @@
++/*
++ * drivers/base/sync.c
++ *
++ * Copyright (C) 2012 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/debugfs.h>
++#include <linux/export.h>
++#include <linux/file.h>
++#include <linux/fs.h>
++#include <linux/kernel.h>
++#include <linux/poll.h>
++#include <linux/sched.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++#include <linux/anon_inodes.h>
++#include <linux/time64.h>
++#include "sync.h"
++
++#ifdef CONFIG_DEBUG_FS
++
++static LIST_HEAD(sync_timeline_list_head);
++static DEFINE_SPINLOCK(sync_timeline_list_lock);
++static LIST_HEAD(sync_fence_list_head);
++static DEFINE_SPINLOCK(sync_fence_list_lock);
++
++void sync_timeline_debug_add(struct sync_timeline *obj)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&sync_timeline_list_lock, flags);
++	list_add_tail(&obj->sync_timeline_list, &sync_timeline_list_head);
++	spin_unlock_irqrestore(&sync_timeline_list_lock, flags);
++}
++
++void sync_timeline_debug_remove(struct sync_timeline *obj)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&sync_timeline_list_lock, flags);
++	list_del(&obj->sync_timeline_list);
++	spin_unlock_irqrestore(&sync_timeline_list_lock, flags);
++}
++
++void sync_fence_debug_add(struct sync_fence *fence)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&sync_fence_list_lock, flags);
++	list_add_tail(&fence->sync_fence_list, &sync_fence_list_head);
++	spin_unlock_irqrestore(&sync_fence_list_lock, flags);
++}
++
++void sync_fence_debug_remove(struct sync_fence *fence)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&sync_fence_list_lock, flags);
++	list_del(&fence->sync_fence_list);
++	spin_unlock_irqrestore(&sync_fence_list_lock, flags);
++}
++
++static const char *sync_status_str(int status)
++{
++	if (status == 0)
++		return "signaled";
++
++	if (status > 0)
++		return "active";
++
++	return "error";
++}
++
++static void sync_print_pt(struct seq_file *s, struct fence *pt, bool fence)
++{
++	int status = 1;
++
++	if (fence_is_signaled_locked(pt))
++		status = pt->status;
++
++	seq_printf(s, "  %s%spt %s",
++		   fence && pt->ops->get_timeline_name ?
++		   pt->ops->get_timeline_name(pt) : "",
++		   fence ? "_" : "",
++		   sync_status_str(status));
++
++	if (status <= 0) {
++		struct timespec64 ts64 =
++			ktime_to_timespec64(pt->timestamp);
++
++		seq_printf(s, "@%lld.%09ld", (s64)ts64.tv_sec, ts64.tv_nsec);
++	}
++
++	if ((!fence || pt->ops->timeline_value_str) &&
++	    pt->ops->fence_value_str) {
++		char value[64];
++		bool success;
++
++		pt->ops->fence_value_str(pt, value, sizeof(value));
++		success = strlen(value);
++
++		if (success)
++			seq_printf(s, ": %s", value);
++
++		if (success && fence) {
++			pt->ops->timeline_value_str(pt, value, sizeof(value));
++
++			if (strlen(value))
++				seq_printf(s, " / %s", value);
++		}
++	}
++
++	seq_puts(s, "\n");
++}
++
++static void sync_print_obj(struct seq_file *s, struct sync_timeline *obj)
++{
++	struct list_head *pos;
++	unsigned long flags;
++
++	seq_printf(s, "%s %s", obj->name, obj->ops->driver_name);
++
++	if (obj->ops->timeline_value_str) {
++		char value[64];
++
++		obj->ops->timeline_value_str(obj, value, sizeof(value));
++		seq_printf(s, ": %s", value);
++	}
++
++	seq_puts(s, "\n");
++
++	spin_lock_irqsave(&obj->child_list_lock, flags);
++	list_for_each(pos, &obj->child_list_head) {
++		struct sync_pt *pt =
++			container_of(pos, struct sync_pt, child_list);
++		sync_print_pt(s, &pt->base, false);
++	}
++	spin_unlock_irqrestore(&obj->child_list_lock, flags);
++}
++
++static void sync_print_fence(struct seq_file *s, struct sync_fence *fence)
++{
++	wait_queue_t *pos;
++	unsigned long flags;
++	int i;
++
++	seq_printf(s, "[%p] %s: %s\n", fence, fence->name,
++		   sync_status_str(atomic_read(&fence->status)));
++
++	for (i = 0; i < fence->num_fences; ++i)
++		sync_print_pt(s, fence->cbs[i].sync_pt, true);
++
++	spin_lock_irqsave(&fence->wq.lock, flags);
++	list_for_each_entry(pos, &fence->wq.task_list, task_list) {
++		struct sync_fence_waiter *waiter;
++
++		if (pos->func != &sync_fence_wake_up_wq)
++			continue;
++
++		waiter = container_of(pos, struct sync_fence_waiter, work);
++
++		seq_printf(s, "waiter %pF\n", waiter->callback);
++	}
++	spin_unlock_irqrestore(&fence->wq.lock, flags);
++}
++
++static int sync_debugfs_show(struct seq_file *s, void *unused)
++{
++	unsigned long flags;
++	struct list_head *pos;
++
++	seq_puts(s, "objs:\n--------------\n");
++
++	spin_lock_irqsave(&sync_timeline_list_lock, flags);
++	list_for_each(pos, &sync_timeline_list_head) {
++		struct sync_timeline *obj =
++			container_of(pos, struct sync_timeline,
++				     sync_timeline_list);
++
++		sync_print_obj(s, obj);
++		seq_puts(s, "\n");
++	}
++	spin_unlock_irqrestore(&sync_timeline_list_lock, flags);
++
++	seq_puts(s, "fences:\n--------------\n");
++
++	spin_lock_irqsave(&sync_fence_list_lock, flags);
++	list_for_each(pos, &sync_fence_list_head) {
++		struct sync_fence *fence =
++			container_of(pos, struct sync_fence, sync_fence_list);
++
++		sync_print_fence(s, fence);
++		seq_puts(s, "\n");
++	}
++	spin_unlock_irqrestore(&sync_fence_list_lock, flags);
++	return 0;
++}
++
++static int sync_debugfs_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, sync_debugfs_show, inode->i_private);
++}
++
++static const struct file_operations sync_debugfs_fops = {
++	.open           = sync_debugfs_open,
++	.read           = seq_read,
++	.llseek         = seq_lseek,
++	.release        = single_release,
++};
++
++static __init int sync_debugfs_init(void)
++{
++	debugfs_create_file("sync", S_IRUGO, NULL, NULL, &sync_debugfs_fops);
++	return 0;
++}
++late_initcall(sync_debugfs_init);
++
++#define DUMP_CHUNK 256
++static char sync_dump_buf[64 * 1024];
++void sync_dump(void)
++{
++	struct seq_file s = {
++		.buf = sync_dump_buf,
++		.size = sizeof(sync_dump_buf) - 1,
++	};
++	int i;
++
++	sync_debugfs_show(&s, NULL);
++
++	for (i = 0; i < s.count; i += DUMP_CHUNK) {
++		if ((s.count - i) > DUMP_CHUNK) {
++			char c = s.buf[i + DUMP_CHUNK];
++
++			s.buf[i + DUMP_CHUNK] = 0;
++			pr_cont("%s", s.buf + i);
++			s.buf[i + DUMP_CHUNK] = c;
++		} else {
++			s.buf[s.count] = 0;
++			pr_cont("%s", s.buf + i);
++		}
++	}
++}
++
++#endif
+diff --git a/drivers/android/trace/sync.h b/drivers/android/trace/sync.h
+new file mode 100644
+index 0000000..7dcf2fe
+--- /dev/null
++++ b/drivers/android/trace/sync.h
+@@ -0,0 +1,82 @@
++#undef TRACE_SYSTEM
++#define TRACE_INCLUDE_PATH ../../drivers/android/trace
++#define TRACE_SYSTEM sync
++
++#if !defined(_TRACE_SYNC_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_SYNC_H
++
++#include "../sync.h"
++#include <linux/tracepoint.h>
++
++TRACE_EVENT(sync_timeline,
++	TP_PROTO(struct sync_timeline *timeline),
++
++	TP_ARGS(timeline),
++
++	TP_STRUCT__entry(
++			__string(name, timeline->name)
++			__array(char, value, 32)
++	),
++
++	TP_fast_assign(
++			__assign_str(name, timeline->name);
++			if (timeline->ops->timeline_value_str) {
++				timeline->ops->timeline_value_str(timeline,
++							__entry->value,
++							sizeof(__entry->value));
++			} else {
++				__entry->value[0] = '\0';
++			}
++	),
++
++	TP_printk("name=%s value=%s", __get_str(name), __entry->value)
++);
++
++TRACE_EVENT(sync_wait,
++	TP_PROTO(struct sync_fence *fence, int begin),
++
++	TP_ARGS(fence, begin),
++
++	TP_STRUCT__entry(
++			__string(name, fence->name)
++			__field(s32, status)
++			__field(u32, begin)
++	),
++
++	TP_fast_assign(
++			__assign_str(name, fence->name);
++			__entry->status = atomic_read(&fence->status);
++			__entry->begin = begin;
++	),
++
++	TP_printk("%s name=%s state=%d", __entry->begin ? "begin" : "end",
++			__get_str(name), __entry->status)
++);
++
++TRACE_EVENT(sync_pt,
++	TP_PROTO(struct fence *pt),
++
++	TP_ARGS(pt),
++
++	TP_STRUCT__entry(
++		__string(timeline, pt->ops->get_timeline_name(pt))
++		__array(char, value, 32)
++	),
++
++	TP_fast_assign(
++		__assign_str(timeline, pt->ops->get_timeline_name(pt));
++		if (pt->ops->fence_value_str) {
++			pt->ops->fence_value_str(pt, __entry->value,
++							sizeof(__entry->value));
++		} else {
++			__entry->value[0] = '\0';
++		}
++	),
++
++	TP_printk("name=%s value=%s", __get_str(timeline), __entry->value)
++);
++
++#endif /* if !defined(_TRACE_SYNC_H) || defined(TRACE_HEADER_MULTI_READ) */
++
++/* This part must be outside protection */
++#include <trace/define_trace.h>
+diff --git a/drivers/staging/android/Kconfig b/drivers/staging/android/Kconfig
+index 42b1512..4b18fee 100644
+--- a/drivers/staging/android/Kconfig
++++ b/drivers/staging/android/Kconfig
+@@ -38,34 +38,6 @@ config ANDROID_LOW_MEMORY_KILLER
+ 	  scripts (/init.rc), and it defines priority values with minimum free memory size
+ 	  for each priority.
+ 
+-config SYNC
+-	bool "Synchronization framework"
+-	default n
+-	select ANON_INODES
+-	select DMA_SHARED_BUFFER
+-	---help---
+-	  This option enables the framework for synchronization between multiple
+-	  drivers.  Sync implementations can take advantage of hardware
+-	  synchronization built into devices like GPUs.
+-
+-config SW_SYNC
+-	bool "Software synchronization objects"
+-	default n
+-	depends on SYNC
+-	---help---
+-	  A sync object driver that uses a 32bit counter to coordinate
+-	  synchronization.  Useful when there is no hardware primitive backing
+-	  the synchronization.
+-
+-config SW_SYNC_USER
+-	bool "Userspace API for SW_SYNC"
+-	default n
+-	depends on SW_SYNC
+-	---help---
+-	  Provides a user space API to the sw sync object.
+-	  *WARNING* improper use of this can result in deadlocking kernel
+-	  drivers from userspace.
+-
+ source "drivers/staging/android/ion/Kconfig"
+ 
+ endif # if ANDROID
+diff --git a/drivers/staging/android/Makefile b/drivers/staging/android/Makefile
+index c7b6c99..355ad0e 100644
+--- a/drivers/staging/android/Makefile
++++ b/drivers/staging/android/Makefile
+@@ -6,5 +6,3 @@ obj-$(CONFIG_ASHMEM)			+= ashmem.o
+ obj-$(CONFIG_ANDROID_TIMED_OUTPUT)	+= timed_output.o
+ obj-$(CONFIG_ANDROID_TIMED_GPIO)	+= timed_gpio.o
+ obj-$(CONFIG_ANDROID_LOW_MEMORY_KILLER)	+= lowmemorykiller.o
+-obj-$(CONFIG_SYNC)			+= sync.o sync_debug.o
+-obj-$(CONFIG_SW_SYNC)			+= sw_sync.o
+diff --git a/drivers/staging/android/sw_sync.c b/drivers/staging/android/sw_sync.c
+deleted file mode 100644
+index c4ff167..0000000
+--- a/drivers/staging/android/sw_sync.c
++++ /dev/null
+@@ -1,260 +0,0 @@
+-/*
+- * drivers/base/sw_sync.c
+- *
+- * Copyright (C) 2012 Google, Inc.
+- *
+- * This software is licensed under the terms of the GNU General Public
+- * License version 2, as published by the Free Software Foundation, and
+- * may be copied, distributed, and modified under those terms.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- */
+-
+-#include <linux/kernel.h>
+-#include <linux/init.h>
+-#include <linux/export.h>
+-#include <linux/file.h>
+-#include <linux/fs.h>
+-#include <linux/miscdevice.h>
+-#include <linux/syscalls.h>
+-#include <linux/uaccess.h>
+-
+-#include "sw_sync.h"
+-
+-static int sw_sync_cmp(u32 a, u32 b)
+-{
+-	if (a == b)
+-		return 0;
+-
+-	return ((s32)a - (s32)b) < 0 ? -1 : 1;
+-}
+-
+-struct sync_pt *sw_sync_pt_create(struct sw_sync_timeline *obj, u32 value)
+-{
+-	struct sw_sync_pt *pt;
+-
+-	pt = (struct sw_sync_pt *)
+-		sync_pt_create(&obj->obj, sizeof(struct sw_sync_pt));
+-
+-	pt->value = value;
+-
+-	return (struct sync_pt *)pt;
+-}
+-EXPORT_SYMBOL(sw_sync_pt_create);
+-
+-static struct sync_pt *sw_sync_pt_dup(struct sync_pt *sync_pt)
+-{
+-	struct sw_sync_pt *pt = (struct sw_sync_pt *)sync_pt;
+-	struct sw_sync_timeline *obj =
+-		(struct sw_sync_timeline *)sync_pt_parent(sync_pt);
+-
+-	return (struct sync_pt *)sw_sync_pt_create(obj, pt->value);
+-}
+-
+-static int sw_sync_pt_has_signaled(struct sync_pt *sync_pt)
+-{
+-	struct sw_sync_pt *pt = (struct sw_sync_pt *)sync_pt;
+-	struct sw_sync_timeline *obj =
+-		(struct sw_sync_timeline *)sync_pt_parent(sync_pt);
+-
+-	return sw_sync_cmp(obj->value, pt->value) >= 0;
+-}
+-
+-static int sw_sync_pt_compare(struct sync_pt *a, struct sync_pt *b)
+-{
+-	struct sw_sync_pt *pt_a = (struct sw_sync_pt *)a;
+-	struct sw_sync_pt *pt_b = (struct sw_sync_pt *)b;
+-
+-	return sw_sync_cmp(pt_a->value, pt_b->value);
+-}
+-
+-static int sw_sync_fill_driver_data(struct sync_pt *sync_pt,
+-				    void *data, int size)
+-{
+-	struct sw_sync_pt *pt = (struct sw_sync_pt *)sync_pt;
+-
+-	if (size < sizeof(pt->value))
+-		return -ENOMEM;
+-
+-	memcpy(data, &pt->value, sizeof(pt->value));
+-
+-	return sizeof(pt->value);
+-}
+-
+-static void sw_sync_timeline_value_str(struct sync_timeline *sync_timeline,
+-				       char *str, int size)
+-{
+-	struct sw_sync_timeline *timeline =
+-		(struct sw_sync_timeline *)sync_timeline;
+-	snprintf(str, size, "%d", timeline->value);
+-}
+-
+-static void sw_sync_pt_value_str(struct sync_pt *sync_pt,
+-				 char *str, int size)
+-{
+-	struct sw_sync_pt *pt = (struct sw_sync_pt *)sync_pt;
+-
+-	snprintf(str, size, "%d", pt->value);
+-}
+-
+-static struct sync_timeline_ops sw_sync_timeline_ops = {
+-	.driver_name = "sw_sync",
+-	.dup = sw_sync_pt_dup,
+-	.has_signaled = sw_sync_pt_has_signaled,
+-	.compare = sw_sync_pt_compare,
+-	.fill_driver_data = sw_sync_fill_driver_data,
+-	.timeline_value_str = sw_sync_timeline_value_str,
+-	.pt_value_str = sw_sync_pt_value_str,
+-};
+-
+-struct sw_sync_timeline *sw_sync_timeline_create(const char *name)
+-{
+-	struct sw_sync_timeline *obj = (struct sw_sync_timeline *)
+-		sync_timeline_create(&sw_sync_timeline_ops,
+-				     sizeof(struct sw_sync_timeline),
+-				     name);
+-
+-	return obj;
+-}
+-EXPORT_SYMBOL(sw_sync_timeline_create);
+-
+-void sw_sync_timeline_inc(struct sw_sync_timeline *obj, u32 inc)
+-{
+-	obj->value += inc;
+-
+-	sync_timeline_signal(&obj->obj);
+-}
+-EXPORT_SYMBOL(sw_sync_timeline_inc);
+-
+-#ifdef CONFIG_SW_SYNC_USER
+-/* *WARNING*
+- *
+- * improper use of this can result in deadlocking kernel drivers from userspace.
+- */
+-
+-/* opening sw_sync create a new sync obj */
+-static int sw_sync_open(struct inode *inode, struct file *file)
+-{
+-	struct sw_sync_timeline *obj;
+-	char task_comm[TASK_COMM_LEN];
+-
+-	get_task_comm(task_comm, current);
+-
+-	obj = sw_sync_timeline_create(task_comm);
+-	if (!obj)
+-		return -ENOMEM;
+-
+-	file->private_data = obj;
+-
+-	return 0;
+-}
+-
+-static int sw_sync_release(struct inode *inode, struct file *file)
+-{
+-	struct sw_sync_timeline *obj = file->private_data;
+-
+-	sync_timeline_destroy(&obj->obj);
+-	return 0;
+-}
+-
+-static long sw_sync_ioctl_create_fence(struct sw_sync_timeline *obj,
+-				       unsigned long arg)
+-{
+-	int fd = get_unused_fd_flags(O_CLOEXEC);
+-	int err;
+-	struct sync_pt *pt;
+-	struct sync_fence *fence;
+-	struct sw_sync_create_fence_data data;
+-
+-	if (fd < 0)
+-		return fd;
+-
+-	if (copy_from_user(&data, (void __user *)arg, sizeof(data))) {
+-		err = -EFAULT;
+-		goto err;
+-	}
+-
+-	pt = sw_sync_pt_create(obj, data.value);
+-	if (!pt) {
+-		err = -ENOMEM;
+-		goto err;
+-	}
+-
+-	data.name[sizeof(data.name) - 1] = '\0';
+-	fence = sync_fence_create(data.name, pt);
+-	if (!fence) {
+-		sync_pt_free(pt);
+-		err = -ENOMEM;
+-		goto err;
+-	}
+-
+-	data.fence = fd;
+-	if (copy_to_user((void __user *)arg, &data, sizeof(data))) {
+-		sync_fence_put(fence);
+-		err = -EFAULT;
+-		goto err;
+-	}
+-
+-	sync_fence_install(fence, fd);
+-
+-	return 0;
+-
+-err:
+-	put_unused_fd(fd);
+-	return err;
+-}
+-
+-static long sw_sync_ioctl_inc(struct sw_sync_timeline *obj, unsigned long arg)
+-{
+-	u32 value;
+-
+-	if (copy_from_user(&value, (void __user *)arg, sizeof(value)))
+-		return -EFAULT;
+-
+-	sw_sync_timeline_inc(obj, value);
+-
+-	return 0;
+-}
+-
+-static long sw_sync_ioctl(struct file *file, unsigned int cmd,
+-			  unsigned long arg)
+-{
+-	struct sw_sync_timeline *obj = file->private_data;
+-
+-	switch (cmd) {
+-	case SW_SYNC_IOC_CREATE_FENCE:
+-		return sw_sync_ioctl_create_fence(obj, arg);
+-
+-	case SW_SYNC_IOC_INC:
+-		return sw_sync_ioctl_inc(obj, arg);
+-
+-	default:
+-		return -ENOTTY;
+-	}
+-}
+-
+-static const struct file_operations sw_sync_fops = {
+-	.owner = THIS_MODULE,
+-	.open = sw_sync_open,
+-	.release = sw_sync_release,
+-	.unlocked_ioctl = sw_sync_ioctl,
+-	.compat_ioctl = sw_sync_ioctl,
+-};
+-
+-static struct miscdevice sw_sync_dev = {
+-	.minor	= MISC_DYNAMIC_MINOR,
+-	.name	= "sw_sync",
+-	.fops	= &sw_sync_fops,
+-};
+-
+-static int __init sw_sync_device_init(void)
+-{
+-	return misc_register(&sw_sync_dev);
+-}
+-device_initcall(sw_sync_device_init);
+-
+-#endif /* CONFIG_SW_SYNC_USER */
+diff --git a/drivers/staging/android/sw_sync.h b/drivers/staging/android/sw_sync.h
+deleted file mode 100644
+index c87ae9e..0000000
+--- a/drivers/staging/android/sw_sync.h
++++ /dev/null
+@@ -1,59 +0,0 @@
+-/*
+- * include/linux/sw_sync.h
+- *
+- * Copyright (C) 2012 Google, Inc.
+- *
+- * This software is licensed under the terms of the GNU General Public
+- * License version 2, as published by the Free Software Foundation, and
+- * may be copied, distributed, and modified under those terms.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- */
+-
+-#ifndef _LINUX_SW_SYNC_H
+-#define _LINUX_SW_SYNC_H
+-
+-#include <linux/types.h>
+-#include <linux/kconfig.h>
+-#include "sync.h"
+-#include "uapi/sw_sync.h"
+-
+-struct sw_sync_timeline {
+-	struct	sync_timeline	obj;
+-
+-	u32			value;
+-};
+-
+-struct sw_sync_pt {
+-	struct sync_pt		pt;
+-
+-	u32			value;
+-};
+-
+-#if IS_ENABLED(CONFIG_SW_SYNC)
+-struct sw_sync_timeline *sw_sync_timeline_create(const char *name);
+-void sw_sync_timeline_inc(struct sw_sync_timeline *obj, u32 inc);
+-
+-struct sync_pt *sw_sync_pt_create(struct sw_sync_timeline *obj, u32 value);
+-#else
+-static inline struct sw_sync_timeline *sw_sync_timeline_create(const char *name)
+-{
+-	return NULL;
+-}
+-
+-static inline void sw_sync_timeline_inc(struct sw_sync_timeline *obj, u32 inc)
+-{
+-}
+-
+-static inline struct sync_pt *sw_sync_pt_create(struct sw_sync_timeline *obj,
+-						u32 value)
+-{
+-	return NULL;
+-}
+-#endif /* IS_ENABLED(CONFIG_SW_SYNC) */
+-
+-#endif /* _LINUX_SW_SYNC_H */
+diff --git a/drivers/staging/android/sync.c b/drivers/staging/android/sync.c
+deleted file mode 100644
+index 7f0e919..0000000
+--- a/drivers/staging/android/sync.c
++++ /dev/null
+@@ -1,734 +0,0 @@
+-/*
+- * drivers/base/sync.c
+- *
+- * Copyright (C) 2012 Google, Inc.
+- *
+- * This software is licensed under the terms of the GNU General Public
+- * License version 2, as published by the Free Software Foundation, and
+- * may be copied, distributed, and modified under those terms.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- */
+-
+-#include <linux/debugfs.h>
+-#include <linux/export.h>
+-#include <linux/file.h>
+-#include <linux/fs.h>
+-#include <linux/kernel.h>
+-#include <linux/poll.h>
+-#include <linux/sched.h>
+-#include <linux/seq_file.h>
+-#include <linux/slab.h>
+-#include <linux/uaccess.h>
+-#include <linux/anon_inodes.h>
+-
+-#include "sync.h"
+-
+-#define CREATE_TRACE_POINTS
+-#include "trace/sync.h"
+-
+-static const struct fence_ops android_fence_ops;
+-static const struct file_operations sync_fence_fops;
+-
+-struct sync_timeline *sync_timeline_create(const struct sync_timeline_ops *ops,
+-					   int size, const char *name)
+-{
+-	struct sync_timeline *obj;
+-
+-	if (size < sizeof(struct sync_timeline))
+-		return NULL;
+-
+-	obj = kzalloc(size, GFP_KERNEL);
+-	if (obj == NULL)
+-		return NULL;
+-
+-	kref_init(&obj->kref);
+-	obj->ops = ops;
+-	obj->context = fence_context_alloc(1);
+-	strlcpy(obj->name, name, sizeof(obj->name));
+-
+-	INIT_LIST_HEAD(&obj->child_list_head);
+-	INIT_LIST_HEAD(&obj->active_list_head);
+-	spin_lock_init(&obj->child_list_lock);
+-
+-	sync_timeline_debug_add(obj);
+-
+-	return obj;
+-}
+-EXPORT_SYMBOL(sync_timeline_create);
+-
+-static void sync_timeline_free(struct kref *kref)
+-{
+-	struct sync_timeline *obj =
+-		container_of(kref, struct sync_timeline, kref);
+-
+-	sync_timeline_debug_remove(obj);
+-
+-	if (obj->ops->release_obj)
+-		obj->ops->release_obj(obj);
+-
+-	kfree(obj);
+-}
+-
+-static void sync_timeline_get(struct sync_timeline *obj)
+-{
+-	kref_get(&obj->kref);
+-}
+-
+-static void sync_timeline_put(struct sync_timeline *obj)
+-{
+-	kref_put(&obj->kref, sync_timeline_free);
+-}
+-
+-void sync_timeline_destroy(struct sync_timeline *obj)
+-{
+-	obj->destroyed = true;
+-	/*
+-	 * Ensure timeline is marked as destroyed before
+-	 * changing timeline's fences status.
+-	 */
+-	smp_wmb();
+-
+-	/*
+-	 * signal any children that their parent is going away.
+-	 */
+-	sync_timeline_signal(obj);
+-	sync_timeline_put(obj);
+-}
+-EXPORT_SYMBOL(sync_timeline_destroy);
+-
+-void sync_timeline_signal(struct sync_timeline *obj)
+-{
+-	unsigned long flags;
+-	LIST_HEAD(signaled_pts);
+-	struct sync_pt *pt, *next;
+-
+-	trace_sync_timeline(obj);
+-
+-	spin_lock_irqsave(&obj->child_list_lock, flags);
+-
+-	list_for_each_entry_safe(pt, next, &obj->active_list_head,
+-				 active_list) {
+-		if (fence_is_signaled_locked(&pt->base))
+-			list_del_init(&pt->active_list);
+-	}
+-
+-	spin_unlock_irqrestore(&obj->child_list_lock, flags);
+-}
+-EXPORT_SYMBOL(sync_timeline_signal);
+-
+-struct sync_pt *sync_pt_create(struct sync_timeline *obj, int size)
+-{
+-	unsigned long flags;
+-	struct sync_pt *pt;
+-
+-	if (size < sizeof(struct sync_pt))
+-		return NULL;
+-
+-	pt = kzalloc(size, GFP_KERNEL);
+-	if (pt == NULL)
+-		return NULL;
+-
+-	spin_lock_irqsave(&obj->child_list_lock, flags);
+-	sync_timeline_get(obj);
+-	fence_init(&pt->base, &android_fence_ops, &obj->child_list_lock,
+-		   obj->context, ++obj->value);
+-	list_add_tail(&pt->child_list, &obj->child_list_head);
+-	INIT_LIST_HEAD(&pt->active_list);
+-	spin_unlock_irqrestore(&obj->child_list_lock, flags);
+-	return pt;
+-}
+-EXPORT_SYMBOL(sync_pt_create);
+-
+-void sync_pt_free(struct sync_pt *pt)
+-{
+-	fence_put(&pt->base);
+-}
+-EXPORT_SYMBOL(sync_pt_free);
+-
+-static struct sync_fence *sync_fence_alloc(int size, const char *name)
+-{
+-	struct sync_fence *fence;
+-
+-	fence = kzalloc(size, GFP_KERNEL);
+-	if (fence == NULL)
+-		return NULL;
+-
+-	fence->file = anon_inode_getfile("sync_fence", &sync_fence_fops,
+-					 fence, 0);
+-	if (IS_ERR(fence->file))
+-		goto err;
+-
+-	kref_init(&fence->kref);
+-	strlcpy(fence->name, name, sizeof(fence->name));
+-
+-	init_waitqueue_head(&fence->wq);
+-
+-	return fence;
+-
+-err:
+-	kfree(fence);
+-	return NULL;
+-}
+-
+-static void fence_check_cb_func(struct fence *f, struct fence_cb *cb)
+-{
+-	struct sync_fence_cb *check;
+-	struct sync_fence *fence;
+-
+-	check = container_of(cb, struct sync_fence_cb, cb);
+-	fence = check->fence;
+-
+-	if (atomic_dec_and_test(&fence->status))
+-		wake_up_all(&fence->wq);
+-}
+-
+-/* TODO: implement a create which takes more that one sync_pt */
+-struct sync_fence *sync_fence_create_dma(const char *name, struct fence *pt)
+-{
+-	struct sync_fence *fence;
+-
+-	fence = sync_fence_alloc(offsetof(struct sync_fence, cbs[1]), name);
+-	if (fence == NULL)
+-		return NULL;
+-
+-	fence->num_fences = 1;
+-	atomic_set(&fence->status, 1);
+-
+-	fence->cbs[0].sync_pt = pt;
+-	fence->cbs[0].fence = fence;
+-	if (fence_add_callback(pt, &fence->cbs[0].cb, fence_check_cb_func))
+-		atomic_dec(&fence->status);
+-
+-	sync_fence_debug_add(fence);
+-
+-	return fence;
+-}
+-EXPORT_SYMBOL(sync_fence_create_dma);
+-
+-struct sync_fence *sync_fence_create(const char *name, struct sync_pt *pt)
+-{
+-	return sync_fence_create_dma(name, &pt->base);
+-}
+-EXPORT_SYMBOL(sync_fence_create);
+-
+-struct sync_fence *sync_fence_fdget(int fd)
+-{
+-	struct file *file = fget(fd);
+-
+-	if (file == NULL)
+-		return NULL;
+-
+-	if (file->f_op != &sync_fence_fops)
+-		goto err;
+-
+-	return file->private_data;
+-
+-err:
+-	fput(file);
+-	return NULL;
+-}
+-EXPORT_SYMBOL(sync_fence_fdget);
+-
+-void sync_fence_put(struct sync_fence *fence)
+-{
+-	fput(fence->file);
+-}
+-EXPORT_SYMBOL(sync_fence_put);
+-
+-void sync_fence_install(struct sync_fence *fence, int fd)
+-{
+-	fd_install(fd, fence->file);
+-}
+-EXPORT_SYMBOL(sync_fence_install);
+-
+-static void sync_fence_add_pt(struct sync_fence *fence,
+-			      int *i, struct fence *pt)
+-{
+-	fence->cbs[*i].sync_pt = pt;
+-	fence->cbs[*i].fence = fence;
+-
+-	if (!fence_add_callback(pt, &fence->cbs[*i].cb, fence_check_cb_func)) {
+-		fence_get(pt);
+-		(*i)++;
+-	}
+-}
+-
+-struct sync_fence *sync_fence_merge(const char *name,
+-				    struct sync_fence *a, struct sync_fence *b)
+-{
+-	int num_fences = a->num_fences + b->num_fences;
+-	struct sync_fence *fence;
+-	int i, i_a, i_b;
+-	unsigned long size = offsetof(struct sync_fence, cbs[num_fences]);
+-
+-	fence = sync_fence_alloc(size, name);
+-	if (fence == NULL)
+-		return NULL;
+-
+-	atomic_set(&fence->status, num_fences);
+-
+-	/*
+-	 * Assume sync_fence a and b are both ordered and have no
+-	 * duplicates with the same context.
+-	 *
+-	 * If a sync_fence can only be created with sync_fence_merge
+-	 * and sync_fence_create, this is a reasonable assumption.
+-	 */
+-	for (i = i_a = i_b = 0; i_a < a->num_fences && i_b < b->num_fences; ) {
+-		struct fence *pt_a = a->cbs[i_a].sync_pt;
+-		struct fence *pt_b = b->cbs[i_b].sync_pt;
+-
+-		if (pt_a->context < pt_b->context) {
+-			sync_fence_add_pt(fence, &i, pt_a);
+-
+-			i_a++;
+-		} else if (pt_a->context > pt_b->context) {
+-			sync_fence_add_pt(fence, &i, pt_b);
+-
+-			i_b++;
+-		} else {
+-			if (pt_a->seqno - pt_b->seqno <= INT_MAX)
+-				sync_fence_add_pt(fence, &i, pt_a);
+-			else
+-				sync_fence_add_pt(fence, &i, pt_b);
+-
+-			i_a++;
+-			i_b++;
+-		}
+-	}
+-
+-	for (; i_a < a->num_fences; i_a++)
+-		sync_fence_add_pt(fence, &i, a->cbs[i_a].sync_pt);
+-
+-	for (; i_b < b->num_fences; i_b++)
+-		sync_fence_add_pt(fence, &i, b->cbs[i_b].sync_pt);
+-
+-	if (num_fences > i)
+-		atomic_sub(num_fences - i, &fence->status);
+-	fence->num_fences = i;
+-
+-	sync_fence_debug_add(fence);
+-	return fence;
+-}
+-EXPORT_SYMBOL(sync_fence_merge);
+-
+-int sync_fence_wake_up_wq(wait_queue_t *curr, unsigned mode,
+-				 int wake_flags, void *key)
+-{
+-	struct sync_fence_waiter *wait;
+-
+-	wait = container_of(curr, struct sync_fence_waiter, work);
+-	list_del_init(&wait->work.task_list);
+-
+-	wait->callback(wait->work.private, wait);
+-	return 1;
+-}
+-
+-int sync_fence_wait_async(struct sync_fence *fence,
+-			  struct sync_fence_waiter *waiter)
+-{
+-	int err = atomic_read(&fence->status);
+-	unsigned long flags;
+-
+-	if (err < 0)
+-		return err;
+-
+-	if (!err)
+-		return 1;
+-
+-	init_waitqueue_func_entry(&waiter->work, sync_fence_wake_up_wq);
+-	waiter->work.private = fence;
+-
+-	spin_lock_irqsave(&fence->wq.lock, flags);
+-	err = atomic_read(&fence->status);
+-	if (err > 0)
+-		__add_wait_queue_tail(&fence->wq, &waiter->work);
+-	spin_unlock_irqrestore(&fence->wq.lock, flags);
+-
+-	if (err < 0)
+-		return err;
+-
+-	return !err;
+-}
+-EXPORT_SYMBOL(sync_fence_wait_async);
+-
+-int sync_fence_cancel_async(struct sync_fence *fence,
+-			     struct sync_fence_waiter *waiter)
+-{
+-	unsigned long flags;
+-	int ret = 0;
+-
+-	spin_lock_irqsave(&fence->wq.lock, flags);
+-	if (!list_empty(&waiter->work.task_list))
+-		list_del_init(&waiter->work.task_list);
+-	else
+-		ret = -ENOENT;
+-	spin_unlock_irqrestore(&fence->wq.lock, flags);
+-	return ret;
+-}
+-EXPORT_SYMBOL(sync_fence_cancel_async);
+-
+-int sync_fence_wait(struct sync_fence *fence, long timeout)
+-{
+-	long ret;
+-	int i;
+-
+-	if (timeout < 0)
+-		timeout = MAX_SCHEDULE_TIMEOUT;
+-	else
+-		timeout = msecs_to_jiffies(timeout);
+-
+-	trace_sync_wait(fence, 1);
+-	for (i = 0; i < fence->num_fences; ++i)
+-		trace_sync_pt(fence->cbs[i].sync_pt);
+-	ret = wait_event_interruptible_timeout(fence->wq,
+-					       atomic_read(&fence->status) <= 0,
+-					       timeout);
+-	trace_sync_wait(fence, 0);
+-
+-	if (ret < 0) {
+-		return ret;
+-	} else if (ret == 0) {
+-		if (timeout) {
+-			pr_info("fence timeout on [%p] after %dms\n", fence,
+-				jiffies_to_msecs(timeout));
+-			sync_dump();
+-		}
+-		return -ETIME;
+-	}
+-
+-	ret = atomic_read(&fence->status);
+-	if (ret) {
+-		pr_info("fence error %ld on [%p]\n", ret, fence);
+-		sync_dump();
+-	}
+-	return ret;
+-}
+-EXPORT_SYMBOL(sync_fence_wait);
+-
+-static const char *android_fence_get_driver_name(struct fence *fence)
+-{
+-	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
+-	struct sync_timeline *parent = sync_pt_parent(pt);
+-
+-	return parent->ops->driver_name;
+-}
+-
+-static const char *android_fence_get_timeline_name(struct fence *fence)
+-{
+-	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
+-	struct sync_timeline *parent = sync_pt_parent(pt);
+-
+-	return parent->name;
+-}
+-
+-static void android_fence_release(struct fence *fence)
+-{
+-	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
+-	struct sync_timeline *parent = sync_pt_parent(pt);
+-	unsigned long flags;
+-
+-	spin_lock_irqsave(fence->lock, flags);
+-	list_del(&pt->child_list);
+-	if (WARN_ON_ONCE(!list_empty(&pt->active_list)))
+-		list_del(&pt->active_list);
+-	spin_unlock_irqrestore(fence->lock, flags);
+-
+-	if (parent->ops->free_pt)
+-		parent->ops->free_pt(pt);
+-
+-	sync_timeline_put(parent);
+-	fence_free(&pt->base);
+-}
+-
+-static bool android_fence_signaled(struct fence *fence)
+-{
+-	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
+-	struct sync_timeline *parent = sync_pt_parent(pt);
+-	int ret;
+-
+-	ret = parent->ops->has_signaled(pt);
+-	if (ret < 0)
+-		fence->status = ret;
+-	return ret;
+-}
+-
+-static bool android_fence_enable_signaling(struct fence *fence)
+-{
+-	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
+-	struct sync_timeline *parent = sync_pt_parent(pt);
+-
+-	if (android_fence_signaled(fence))
+-		return false;
+-
+-	list_add_tail(&pt->active_list, &parent->active_list_head);
+-	return true;
+-}
+-
+-static int android_fence_fill_driver_data(struct fence *fence,
+-					  void *data, int size)
+-{
+-	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
+-	struct sync_timeline *parent = sync_pt_parent(pt);
+-
+-	if (!parent->ops->fill_driver_data)
+-		return 0;
+-	return parent->ops->fill_driver_data(pt, data, size);
+-}
+-
+-static void android_fence_value_str(struct fence *fence,
+-				    char *str, int size)
+-{
+-	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
+-	struct sync_timeline *parent = sync_pt_parent(pt);
+-
+-	if (!parent->ops->pt_value_str) {
+-		if (size)
+-			*str = 0;
+-		return;
+-	}
+-	parent->ops->pt_value_str(pt, str, size);
+-}
+-
+-static void android_fence_timeline_value_str(struct fence *fence,
+-					     char *str, int size)
+-{
+-	struct sync_pt *pt = container_of(fence, struct sync_pt, base);
+-	struct sync_timeline *parent = sync_pt_parent(pt);
+-
+-	if (!parent->ops->timeline_value_str) {
+-		if (size)
+-			*str = 0;
+-		return;
+-	}
+-	parent->ops->timeline_value_str(parent, str, size);
+-}
+-
+-static const struct fence_ops android_fence_ops = {
+-	.get_driver_name = android_fence_get_driver_name,
+-	.get_timeline_name = android_fence_get_timeline_name,
+-	.enable_signaling = android_fence_enable_signaling,
+-	.signaled = android_fence_signaled,
+-	.wait = fence_default_wait,
+-	.release = android_fence_release,
+-	.fill_driver_data = android_fence_fill_driver_data,
+-	.fence_value_str = android_fence_value_str,
+-	.timeline_value_str = android_fence_timeline_value_str,
+-};
+-
+-static void sync_fence_free(struct kref *kref)
+-{
+-	struct sync_fence *fence = container_of(kref, struct sync_fence, kref);
+-	int i, status = atomic_read(&fence->status);
+-
+-	for (i = 0; i < fence->num_fences; ++i) {
+-		if (status)
+-			fence_remove_callback(fence->cbs[i].sync_pt,
+-					      &fence->cbs[i].cb);
+-		fence_put(fence->cbs[i].sync_pt);
+-	}
+-
+-	kfree(fence);
+-}
+-
+-static int sync_fence_release(struct inode *inode, struct file *file)
+-{
+-	struct sync_fence *fence = file->private_data;
+-
+-	sync_fence_debug_remove(fence);
+-
+-	kref_put(&fence->kref, sync_fence_free);
+-	return 0;
+-}
+-
+-static unsigned int sync_fence_poll(struct file *file, poll_table *wait)
+-{
+-	struct sync_fence *fence = file->private_data;
+-	int status;
+-
+-	poll_wait(file, &fence->wq, wait);
+-
+-	status = atomic_read(&fence->status);
+-
+-	if (!status)
+-		return POLLIN;
+-	else if (status < 0)
+-		return POLLERR;
+-	return 0;
+-}
+-
+-static long sync_fence_ioctl_wait(struct sync_fence *fence, unsigned long arg)
+-{
+-	__s32 value;
+-
+-	if (copy_from_user(&value, (void __user *)arg, sizeof(value)))
+-		return -EFAULT;
+-
+-	return sync_fence_wait(fence, value);
+-}
+-
+-static long sync_fence_ioctl_merge(struct sync_fence *fence, unsigned long arg)
+-{
+-	int fd = get_unused_fd_flags(O_CLOEXEC);
+-	int err;
+-	struct sync_fence *fence2, *fence3;
+-	struct sync_merge_data data;
+-
+-	if (fd < 0)
+-		return fd;
+-
+-	if (copy_from_user(&data, (void __user *)arg, sizeof(data))) {
+-		err = -EFAULT;
+-		goto err_put_fd;
+-	}
+-
+-	fence2 = sync_fence_fdget(data.fd2);
+-	if (fence2 == NULL) {
+-		err = -ENOENT;
+-		goto err_put_fd;
+-	}
+-
+-	data.name[sizeof(data.name) - 1] = '\0';
+-	fence3 = sync_fence_merge(data.name, fence, fence2);
+-	if (fence3 == NULL) {
+-		err = -ENOMEM;
+-		goto err_put_fence2;
+-	}
+-
+-	data.fence = fd;
+-	if (copy_to_user((void __user *)arg, &data, sizeof(data))) {
+-		err = -EFAULT;
+-		goto err_put_fence3;
+-	}
+-
+-	sync_fence_install(fence3, fd);
+-	sync_fence_put(fence2);
+-	return 0;
+-
+-err_put_fence3:
+-	sync_fence_put(fence3);
+-
+-err_put_fence2:
+-	sync_fence_put(fence2);
+-
+-err_put_fd:
+-	put_unused_fd(fd);
+-	return err;
+-}
+-
+-static int sync_fill_pt_info(struct fence *fence, void *data, int size)
+-{
+-	struct sync_pt_info *info = data;
+-	int ret;
+-
+-	if (size < sizeof(struct sync_pt_info))
+-		return -ENOMEM;
+-
+-	info->len = sizeof(struct sync_pt_info);
+-
+-	if (fence->ops->fill_driver_data) {
+-		ret = fence->ops->fill_driver_data(fence, info->driver_data,
+-						   size - sizeof(*info));
+-		if (ret < 0)
+-			return ret;
+-
+-		info->len += ret;
+-	}
+-
+-	strlcpy(info->obj_name, fence->ops->get_timeline_name(fence),
+-		sizeof(info->obj_name));
+-	strlcpy(info->driver_name, fence->ops->get_driver_name(fence),
+-		sizeof(info->driver_name));
+-	if (fence_is_signaled(fence))
+-		info->status = fence->status >= 0 ? 1 : fence->status;
+-	else
+-		info->status = 0;
+-	info->timestamp_ns = ktime_to_ns(fence->timestamp);
+-
+-	return info->len;
+-}
+-
+-static long sync_fence_ioctl_fence_info(struct sync_fence *fence,
+-					unsigned long arg)
+-{
+-	struct sync_fence_info_data *data;
+-	__u32 size;
+-	__u32 len = 0;
+-	int ret, i;
+-
+-	if (copy_from_user(&size, (void __user *)arg, sizeof(size)))
+-		return -EFAULT;
+-
+-	if (size < sizeof(struct sync_fence_info_data))
+-		return -EINVAL;
+-
+-	if (size > 4096)
+-		size = 4096;
+-
+-	data = kzalloc(size, GFP_KERNEL);
+-	if (data == NULL)
+-		return -ENOMEM;
+-
+-	strlcpy(data->name, fence->name, sizeof(data->name));
+-	data->status = atomic_read(&fence->status);
+-	if (data->status >= 0)
+-		data->status = !data->status;
+-
+-	len = sizeof(struct sync_fence_info_data);
+-
+-	for (i = 0; i < fence->num_fences; ++i) {
+-		struct fence *pt = fence->cbs[i].sync_pt;
+-
+-		ret = sync_fill_pt_info(pt, (u8 *)data + len, size - len);
+-
+-		if (ret < 0)
+-			goto out;
+-
+-		len += ret;
+-	}
+-
+-	data->len = len;
+-
+-	if (copy_to_user((void __user *)arg, data, len))
+-		ret = -EFAULT;
+-	else
+-		ret = 0;
+-
+-out:
+-	kfree(data);
+-
+-	return ret;
+-}
+-
+-static long sync_fence_ioctl(struct file *file, unsigned int cmd,
+-			     unsigned long arg)
+-{
+-	struct sync_fence *fence = file->private_data;
+-
+-	switch (cmd) {
+-	case SYNC_IOC_WAIT:
+-		return sync_fence_ioctl_wait(fence, arg);
+-
+-	case SYNC_IOC_MERGE:
+-		return sync_fence_ioctl_merge(fence, arg);
+-
+-	case SYNC_IOC_FENCE_INFO:
+-		return sync_fence_ioctl_fence_info(fence, arg);
+-
+-	default:
+-		return -ENOTTY;
+-	}
+-}
+-
+-static const struct file_operations sync_fence_fops = {
+-	.release = sync_fence_release,
+-	.poll = sync_fence_poll,
+-	.unlocked_ioctl = sync_fence_ioctl,
+-	.compat_ioctl = sync_fence_ioctl,
+-};
+-
+diff --git a/drivers/staging/android/sync.h b/drivers/staging/android/sync.h
+deleted file mode 100644
+index afa0752..0000000
+--- a/drivers/staging/android/sync.h
++++ /dev/null
+@@ -1,366 +0,0 @@
+-/*
+- * include/linux/sync.h
+- *
+- * Copyright (C) 2012 Google, Inc.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- */
+-
+-#ifndef _LINUX_SYNC_H
+-#define _LINUX_SYNC_H
+-
+-#include <linux/types.h>
+-#include <linux/kref.h>
+-#include <linux/ktime.h>
+-#include <linux/list.h>
+-#include <linux/spinlock.h>
+-#include <linux/wait.h>
+-#include <linux/fence.h>
+-
+-#include "uapi/sync.h"
+-
+-struct sync_timeline;
+-struct sync_pt;
+-struct sync_fence;
+-
+-/**
+- * struct sync_timeline_ops - sync object implementation ops
+- * @driver_name:	name of the implementation
+- * @dup:		duplicate a sync_pt
+- * @has_signaled:	returns:
+- *			  1 if pt has signaled
+- *			  0 if pt has not signaled
+- *			 <0 on error
+- * @compare:		returns:
+- *			  1 if b will signal before a
+- *			  0 if a and b will signal at the same time
+- *			 -1 if a will signal before b
+- * @free_pt:		called before sync_pt is freed
+- * @release_obj:	called before sync_timeline is freed
+- * @fill_driver_data:	write implementation specific driver data to data.
+- *			  should return an error if there is not enough room
+- *			  as specified by size.  This information is returned
+- *			  to userspace by SYNC_IOC_FENCE_INFO.
+- * @timeline_value_str: fill str with the value of the sync_timeline's counter
+- * @pt_value_str:	fill str with the value of the sync_pt
+- */
+-struct sync_timeline_ops {
+-	const char *driver_name;
+-
+-	/* required */
+-	struct sync_pt * (*dup)(struct sync_pt *pt);
+-
+-	/* required */
+-	int (*has_signaled)(struct sync_pt *pt);
+-
+-	/* required */
+-	int (*compare)(struct sync_pt *a, struct sync_pt *b);
+-
+-	/* optional */
+-	void (*free_pt)(struct sync_pt *sync_pt);
+-
+-	/* optional */
+-	void (*release_obj)(struct sync_timeline *sync_timeline);
+-
+-	/* optional */
+-	int (*fill_driver_data)(struct sync_pt *syncpt, void *data, int size);
+-
+-	/* optional */
+-	void (*timeline_value_str)(struct sync_timeline *timeline, char *str,
+-				   int size);
+-
+-	/* optional */
+-	void (*pt_value_str)(struct sync_pt *pt, char *str, int size);
+-};
+-
+-/**
+- * struct sync_timeline - sync object
+- * @kref:		reference count on fence.
+- * @ops:		ops that define the implementation of the sync_timeline
+- * @name:		name of the sync_timeline. Useful for debugging
+- * @destroyed:		set when sync_timeline is destroyed
+- * @child_list_head:	list of children sync_pts for this sync_timeline
+- * @child_list_lock:	lock protecting @child_list_head, destroyed, and
+- *			  sync_pt.status
+- * @active_list_head:	list of active (unsignaled/errored) sync_pts
+- * @sync_timeline_list:	membership in global sync_timeline_list
+- */
+-struct sync_timeline {
+-	struct kref		kref;
+-	const struct sync_timeline_ops	*ops;
+-	char			name[32];
+-
+-	/* protected by child_list_lock */
+-	bool			destroyed;
+-	int			context, value;
+-
+-	struct list_head	child_list_head;
+-	spinlock_t		child_list_lock;
+-
+-	struct list_head	active_list_head;
+-
+-#ifdef CONFIG_DEBUG_FS
+-	struct list_head	sync_timeline_list;
+-#endif
+-};
+-
+-/**
+- * struct sync_pt - sync point
+- * @fence:		base fence class
+- * @child_list:		membership in sync_timeline.child_list_head
+- * @active_list:	membership in sync_timeline.active_list_head
+- * @signaled_list:	membership in temporary signaled_list on stack
+- * @fence:		sync_fence to which the sync_pt belongs
+- * @pt_list:		membership in sync_fence.pt_list_head
+- * @status:		1: signaled, 0:active, <0: error
+- * @timestamp:		time which sync_pt status transitioned from active to
+- *			  signaled or error.
+- */
+-struct sync_pt {
+-	struct fence base;
+-
+-	struct list_head	child_list;
+-	struct list_head	active_list;
+-};
+-
+-static inline struct sync_timeline *sync_pt_parent(struct sync_pt *pt)
+-{
+-	return container_of(pt->base.lock, struct sync_timeline,
+-			    child_list_lock);
+-}
+-
+-struct sync_fence_cb {
+-	struct fence_cb cb;
+-	struct fence *sync_pt;
+-	struct sync_fence *fence;
+-};
+-
+-/**
+- * struct sync_fence - sync fence
+- * @file:		file representing this fence
+- * @kref:		reference count on fence.
+- * @name:		name of sync_fence.  Useful for debugging
+- * @pt_list_head:	list of sync_pts in the fence.  immutable once fence
+- *			  is created
+- * @status:		0: signaled, >0:active, <0: error
+- *
+- * @wq:			wait queue for fence signaling
+- * @sync_fence_list:	membership in global fence list
+- */
+-struct sync_fence {
+-	struct file		*file;
+-	struct kref		kref;
+-	char			name[32];
+-#ifdef CONFIG_DEBUG_FS
+-	struct list_head	sync_fence_list;
+-#endif
+-	int num_fences;
+-
+-	wait_queue_head_t	wq;
+-	atomic_t		status;
+-
+-	struct sync_fence_cb	cbs[];
+-};
+-
+-struct sync_fence_waiter;
+-typedef void (*sync_callback_t)(struct sync_fence *fence,
+-				struct sync_fence_waiter *waiter);
+-
+-/**
+- * struct sync_fence_waiter - metadata for asynchronous waiter on a fence
+- * @waiter_list:	membership in sync_fence.waiter_list_head
+- * @callback:		function pointer to call when fence signals
+- * @callback_data:	pointer to pass to @callback
+- */
+-struct sync_fence_waiter {
+-	wait_queue_t work;
+-	sync_callback_t callback;
+-};
+-
+-static inline void sync_fence_waiter_init(struct sync_fence_waiter *waiter,
+-					  sync_callback_t callback)
+-{
+-	INIT_LIST_HEAD(&waiter->work.task_list);
+-	waiter->callback = callback;
+-}
+-
+-/*
+- * API for sync_timeline implementers
+- */
+-
+-/**
+- * sync_timeline_create() - creates a sync object
+- * @ops:	specifies the implementation ops for the object
+- * @size:	size to allocate for this obj
+- * @name:	sync_timeline name
+- *
+- * Creates a new sync_timeline which will use the implementation specified by
+- * @ops.  @size bytes will be allocated allowing for implementation specific
+- * data to be kept after the generic sync_timeline struct.
+- */
+-struct sync_timeline *sync_timeline_create(const struct sync_timeline_ops *ops,
+-					   int size, const char *name);
+-
+-/**
+- * sync_timeline_destroy() - destroys a sync object
+- * @obj:	sync_timeline to destroy
+- *
+- * A sync implementation should call this when the @obj is going away
+- * (i.e. module unload.)  @obj won't actually be freed until all its children
+- * sync_pts are freed.
+- */
+-void sync_timeline_destroy(struct sync_timeline *obj);
+-
+-/**
+- * sync_timeline_signal() - signal a status change on a sync_timeline
+- * @obj:	sync_timeline to signal
+- *
+- * A sync implementation should call this any time one of it's sync_pts
+- * has signaled or has an error condition.
+- */
+-void sync_timeline_signal(struct sync_timeline *obj);
+-
+-/**
+- * sync_pt_create() - creates a sync pt
+- * @parent:	sync_pt's parent sync_timeline
+- * @size:	size to allocate for this pt
+- *
+- * Creates a new sync_pt as a child of @parent.  @size bytes will be
+- * allocated allowing for implementation specific data to be kept after
+- * the generic sync_timeline struct.
+- */
+-struct sync_pt *sync_pt_create(struct sync_timeline *parent, int size);
+-
+-/**
+- * sync_pt_free() - frees a sync pt
+- * @pt:		sync_pt to free
+- *
+- * This should only be called on sync_pts which have been created but
+- * not added to a fence.
+- */
+-void sync_pt_free(struct sync_pt *pt);
+-
+-/**
+- * sync_fence_create() - creates a sync fence
+- * @name:	name of fence to create
+- * @pt:		sync_pt to add to the fence
+- *
+- * Creates a fence containg @pt.  Once this is called, the fence takes
+- * ownership of @pt.
+- */
+-struct sync_fence *sync_fence_create(const char *name, struct sync_pt *pt);
+-
+-/**
+- * sync_fence_create_dma() - creates a sync fence from dma-fence
+- * @name:	name of fence to create
+- * @pt:	dma-fence to add to the fence
+- *
+- * Creates a fence containg @pt.  Once this is called, the fence takes
+- * ownership of @pt.
+- */
+-struct sync_fence *sync_fence_create_dma(const char *name, struct fence *pt);
+-
+-/*
+- * API for sync_fence consumers
+- */
+-
+-/**
+- * sync_fence_merge() - merge two fences
+- * @name:	name of new fence
+- * @a:		fence a
+- * @b:		fence b
+- *
+- * Creates a new fence which contains copies of all the sync_pts in both
+- * @a and @b.  @a and @b remain valid, independent fences.
+- */
+-struct sync_fence *sync_fence_merge(const char *name,
+-				    struct sync_fence *a, struct sync_fence *b);
+-
+-/**
+- * sync_fence_fdget() - get a fence from an fd
+- * @fd:		fd referencing a fence
+- *
+- * Ensures @fd references a valid fence, increments the refcount of the backing
+- * file, and returns the fence.
+- */
+-struct sync_fence *sync_fence_fdget(int fd);
+-
+-/**
+- * sync_fence_put() - puts a reference of a sync fence
+- * @fence:	fence to put
+- *
+- * Puts a reference on @fence.  If this is the last reference, the fence and
+- * all it's sync_pts will be freed
+- */
+-void sync_fence_put(struct sync_fence *fence);
+-
+-/**
+- * sync_fence_install() - installs a fence into a file descriptor
+- * @fence:	fence to install
+- * @fd:		file descriptor in which to install the fence
+- *
+- * Installs @fence into @fd.  @fd's should be acquired through
+- * get_unused_fd_flags(O_CLOEXEC).
+- */
+-void sync_fence_install(struct sync_fence *fence, int fd);
+-
+-/**
+- * sync_fence_wait_async() - registers and async wait on the fence
+- * @fence:		fence to wait on
+- * @waiter:		waiter callback struck
+- *
+- * Returns 1 if @fence has already signaled.
+- *
+- * Registers a callback to be called when @fence signals or has an error.
+- * @waiter should be initialized with sync_fence_waiter_init().
+- */
+-int sync_fence_wait_async(struct sync_fence *fence,
+-			  struct sync_fence_waiter *waiter);
+-
+-/**
+- * sync_fence_cancel_async() - cancels an async wait
+- * @fence:		fence to wait on
+- * @waiter:		waiter callback struck
+- *
+- * returns 0 if waiter was removed from fence's async waiter list.
+- * returns -ENOENT if waiter was not found on fence's async waiter list.
+- *
+- * Cancels a previously registered async wait.  Will fail gracefully if
+- * @waiter was never registered or if @fence has already signaled @waiter.
+- */
+-int sync_fence_cancel_async(struct sync_fence *fence,
+-			    struct sync_fence_waiter *waiter);
+-
+-/**
+- * sync_fence_wait() - wait on fence
+- * @fence:	fence to wait on
+- * @tiemout:	timeout in ms
+- *
+- * Wait for @fence to be signaled or have an error.  Waits indefinitely
+- * if @timeout < 0
+- */
+-int sync_fence_wait(struct sync_fence *fence, long timeout);
+-
+-#ifdef CONFIG_DEBUG_FS
+-
+-void sync_timeline_debug_add(struct sync_timeline *obj);
+-void sync_timeline_debug_remove(struct sync_timeline *obj);
+-void sync_fence_debug_add(struct sync_fence *fence);
+-void sync_fence_debug_remove(struct sync_fence *fence);
+-void sync_dump(void);
+-
+-#else
+-# define sync_timeline_debug_add(obj)
+-# define sync_timeline_debug_remove(obj)
+-# define sync_fence_debug_add(fence)
+-# define sync_fence_debug_remove(fence)
+-# define sync_dump()
+-#endif
+-int sync_fence_wake_up_wq(wait_queue_t *curr, unsigned mode,
+-				 int wake_flags, void *key);
+-
+-#endif /* _LINUX_SYNC_H */
+diff --git a/drivers/staging/android/sync_debug.c b/drivers/staging/android/sync_debug.c
+deleted file mode 100644
+index 02a1649..0000000
+--- a/drivers/staging/android/sync_debug.c
++++ /dev/null
+@@ -1,255 +0,0 @@
+-/*
+- * drivers/base/sync.c
+- *
+- * Copyright (C) 2012 Google, Inc.
+- *
+- * This software is licensed under the terms of the GNU General Public
+- * License version 2, as published by the Free Software Foundation, and
+- * may be copied, distributed, and modified under those terms.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- */
+-
+-#include <linux/debugfs.h>
+-#include <linux/export.h>
+-#include <linux/file.h>
+-#include <linux/fs.h>
+-#include <linux/kernel.h>
+-#include <linux/poll.h>
+-#include <linux/sched.h>
+-#include <linux/seq_file.h>
+-#include <linux/slab.h>
+-#include <linux/uaccess.h>
+-#include <linux/anon_inodes.h>
+-#include <linux/time64.h>
+-#include "sync.h"
+-
+-#ifdef CONFIG_DEBUG_FS
+-
+-static LIST_HEAD(sync_timeline_list_head);
+-static DEFINE_SPINLOCK(sync_timeline_list_lock);
+-static LIST_HEAD(sync_fence_list_head);
+-static DEFINE_SPINLOCK(sync_fence_list_lock);
+-
+-void sync_timeline_debug_add(struct sync_timeline *obj)
+-{
+-	unsigned long flags;
+-
+-	spin_lock_irqsave(&sync_timeline_list_lock, flags);
+-	list_add_tail(&obj->sync_timeline_list, &sync_timeline_list_head);
+-	spin_unlock_irqrestore(&sync_timeline_list_lock, flags);
+-}
+-
+-void sync_timeline_debug_remove(struct sync_timeline *obj)
+-{
+-	unsigned long flags;
+-
+-	spin_lock_irqsave(&sync_timeline_list_lock, flags);
+-	list_del(&obj->sync_timeline_list);
+-	spin_unlock_irqrestore(&sync_timeline_list_lock, flags);
+-}
+-
+-void sync_fence_debug_add(struct sync_fence *fence)
+-{
+-	unsigned long flags;
+-
+-	spin_lock_irqsave(&sync_fence_list_lock, flags);
+-	list_add_tail(&fence->sync_fence_list, &sync_fence_list_head);
+-	spin_unlock_irqrestore(&sync_fence_list_lock, flags);
+-}
+-
+-void sync_fence_debug_remove(struct sync_fence *fence)
+-{
+-	unsigned long flags;
+-
+-	spin_lock_irqsave(&sync_fence_list_lock, flags);
+-	list_del(&fence->sync_fence_list);
+-	spin_unlock_irqrestore(&sync_fence_list_lock, flags);
+-}
+-
+-static const char *sync_status_str(int status)
+-{
+-	if (status == 0)
+-		return "signaled";
+-
+-	if (status > 0)
+-		return "active";
+-
+-	return "error";
+-}
+-
+-static void sync_print_pt(struct seq_file *s, struct fence *pt, bool fence)
+-{
+-	int status = 1;
+-
+-	if (fence_is_signaled_locked(pt))
+-		status = pt->status;
+-
+-	seq_printf(s, "  %s%spt %s",
+-		   fence && pt->ops->get_timeline_name ?
+-		   pt->ops->get_timeline_name(pt) : "",
+-		   fence ? "_" : "",
+-		   sync_status_str(status));
+-
+-	if (status <= 0) {
+-		struct timespec64 ts64 =
+-			ktime_to_timespec64(pt->timestamp);
+-
+-		seq_printf(s, "@%lld.%09ld", (s64)ts64.tv_sec, ts64.tv_nsec);
+-	}
+-
+-	if ((!fence || pt->ops->timeline_value_str) &&
+-	    pt->ops->fence_value_str) {
+-		char value[64];
+-		bool success;
+-
+-		pt->ops->fence_value_str(pt, value, sizeof(value));
+-		success = strlen(value);
+-
+-		if (success)
+-			seq_printf(s, ": %s", value);
+-
+-		if (success && fence) {
+-			pt->ops->timeline_value_str(pt, value, sizeof(value));
+-
+-			if (strlen(value))
+-				seq_printf(s, " / %s", value);
+-		}
+-	}
+-
+-	seq_puts(s, "\n");
+-}
+-
+-static void sync_print_obj(struct seq_file *s, struct sync_timeline *obj)
+-{
+-	struct list_head *pos;
+-	unsigned long flags;
+-
+-	seq_printf(s, "%s %s", obj->name, obj->ops->driver_name);
+-
+-	if (obj->ops->timeline_value_str) {
+-		char value[64];
+-
+-		obj->ops->timeline_value_str(obj, value, sizeof(value));
+-		seq_printf(s, ": %s", value);
+-	}
+-
+-	seq_puts(s, "\n");
+-
+-	spin_lock_irqsave(&obj->child_list_lock, flags);
+-	list_for_each(pos, &obj->child_list_head) {
+-		struct sync_pt *pt =
+-			container_of(pos, struct sync_pt, child_list);
+-		sync_print_pt(s, &pt->base, false);
+-	}
+-	spin_unlock_irqrestore(&obj->child_list_lock, flags);
+-}
+-
+-static void sync_print_fence(struct seq_file *s, struct sync_fence *fence)
+-{
+-	wait_queue_t *pos;
+-	unsigned long flags;
+-	int i;
+-
+-	seq_printf(s, "[%p] %s: %s\n", fence, fence->name,
+-		   sync_status_str(atomic_read(&fence->status)));
+-
+-	for (i = 0; i < fence->num_fences; ++i)
+-		sync_print_pt(s, fence->cbs[i].sync_pt, true);
+-
+-	spin_lock_irqsave(&fence->wq.lock, flags);
+-	list_for_each_entry(pos, &fence->wq.task_list, task_list) {
+-		struct sync_fence_waiter *waiter;
+-
+-		if (pos->func != &sync_fence_wake_up_wq)
+-			continue;
+-
+-		waiter = container_of(pos, struct sync_fence_waiter, work);
+-
+-		seq_printf(s, "waiter %pF\n", waiter->callback);
+-	}
+-	spin_unlock_irqrestore(&fence->wq.lock, flags);
+-}
+-
+-static int sync_debugfs_show(struct seq_file *s, void *unused)
+-{
+-	unsigned long flags;
+-	struct list_head *pos;
+-
+-	seq_puts(s, "objs:\n--------------\n");
+-
+-	spin_lock_irqsave(&sync_timeline_list_lock, flags);
+-	list_for_each(pos, &sync_timeline_list_head) {
+-		struct sync_timeline *obj =
+-			container_of(pos, struct sync_timeline,
+-				     sync_timeline_list);
+-
+-		sync_print_obj(s, obj);
+-		seq_puts(s, "\n");
+-	}
+-	spin_unlock_irqrestore(&sync_timeline_list_lock, flags);
+-
+-	seq_puts(s, "fences:\n--------------\n");
+-
+-	spin_lock_irqsave(&sync_fence_list_lock, flags);
+-	list_for_each(pos, &sync_fence_list_head) {
+-		struct sync_fence *fence =
+-			container_of(pos, struct sync_fence, sync_fence_list);
+-
+-		sync_print_fence(s, fence);
+-		seq_puts(s, "\n");
+-	}
+-	spin_unlock_irqrestore(&sync_fence_list_lock, flags);
+-	return 0;
+-}
+-
+-static int sync_debugfs_open(struct inode *inode, struct file *file)
+-{
+-	return single_open(file, sync_debugfs_show, inode->i_private);
+-}
+-
+-static const struct file_operations sync_debugfs_fops = {
+-	.open           = sync_debugfs_open,
+-	.read           = seq_read,
+-	.llseek         = seq_lseek,
+-	.release        = single_release,
+-};
+-
+-static __init int sync_debugfs_init(void)
+-{
+-	debugfs_create_file("sync", S_IRUGO, NULL, NULL, &sync_debugfs_fops);
+-	return 0;
+-}
+-late_initcall(sync_debugfs_init);
+-
+-#define DUMP_CHUNK 256
+-static char sync_dump_buf[64 * 1024];
+-void sync_dump(void)
+-{
+-	struct seq_file s = {
+-		.buf = sync_dump_buf,
+-		.size = sizeof(sync_dump_buf) - 1,
+-	};
+-	int i;
+-
+-	sync_debugfs_show(&s, NULL);
+-
+-	for (i = 0; i < s.count; i += DUMP_CHUNK) {
+-		if ((s.count - i) > DUMP_CHUNK) {
+-			char c = s.buf[i + DUMP_CHUNK];
+-
+-			s.buf[i + DUMP_CHUNK] = 0;
+-			pr_cont("%s", s.buf + i);
+-			s.buf[i + DUMP_CHUNK] = c;
+-		} else {
+-			s.buf[s.count] = 0;
+-			pr_cont("%s", s.buf + i);
+-		}
+-	}
+-}
+-
+-#endif
+diff --git a/drivers/staging/android/trace/sync.h b/drivers/staging/android/trace/sync.h
+deleted file mode 100644
+index 77edb97..0000000
+--- a/drivers/staging/android/trace/sync.h
++++ /dev/null
+@@ -1,82 +0,0 @@
+-#undef TRACE_SYSTEM
+-#define TRACE_INCLUDE_PATH ../../drivers/staging/android/trace
+-#define TRACE_SYSTEM sync
+-
+-#if !defined(_TRACE_SYNC_H) || defined(TRACE_HEADER_MULTI_READ)
+-#define _TRACE_SYNC_H
+-
+-#include "../sync.h"
+-#include <linux/tracepoint.h>
+-
+-TRACE_EVENT(sync_timeline,
+-	TP_PROTO(struct sync_timeline *timeline),
+-
+-	TP_ARGS(timeline),
+-
+-	TP_STRUCT__entry(
+-			__string(name, timeline->name)
+-			__array(char, value, 32)
+-	),
+-
+-	TP_fast_assign(
+-			__assign_str(name, timeline->name);
+-			if (timeline->ops->timeline_value_str) {
+-				timeline->ops->timeline_value_str(timeline,
+-							__entry->value,
+-							sizeof(__entry->value));
+-			} else {
+-				__entry->value[0] = '\0';
+-			}
+-	),
+-
+-	TP_printk("name=%s value=%s", __get_str(name), __entry->value)
+-);
+-
+-TRACE_EVENT(sync_wait,
+-	TP_PROTO(struct sync_fence *fence, int begin),
+-
+-	TP_ARGS(fence, begin),
+-
+-	TP_STRUCT__entry(
+-			__string(name, fence->name)
+-			__field(s32, status)
+-			__field(u32, begin)
+-	),
+-
+-	TP_fast_assign(
+-			__assign_str(name, fence->name);
+-			__entry->status = atomic_read(&fence->status);
+-			__entry->begin = begin;
+-	),
+-
+-	TP_printk("%s name=%s state=%d", __entry->begin ? "begin" : "end",
+-			__get_str(name), __entry->status)
+-);
+-
+-TRACE_EVENT(sync_pt,
+-	TP_PROTO(struct fence *pt),
+-
+-	TP_ARGS(pt),
+-
+-	TP_STRUCT__entry(
+-		__string(timeline, pt->ops->get_timeline_name(pt))
+-		__array(char, value, 32)
+-	),
+-
+-	TP_fast_assign(
+-		__assign_str(timeline, pt->ops->get_timeline_name(pt));
+-		if (pt->ops->fence_value_str) {
+-			pt->ops->fence_value_str(pt, __entry->value,
+-							sizeof(__entry->value));
+-		} else {
+-			__entry->value[0] = '\0';
+-		}
+-	),
+-
+-	TP_printk("name=%s value=%s", __get_str(timeline), __entry->value)
+-);
+-
+-#endif /* if !defined(_TRACE_SYNC_H) || defined(TRACE_HEADER_MULTI_READ) */
+-
+-/* This part must be outside protection */
+-#include <trace/define_trace.h>
+diff --git a/drivers/staging/android/uapi/sw_sync.h b/drivers/staging/android/uapi/sw_sync.h
+deleted file mode 100644
+index 9b5d486..0000000
+--- a/drivers/staging/android/uapi/sw_sync.h
++++ /dev/null
+@@ -1,32 +0,0 @@
+-/*
+- * Copyright (C) 2012 Google, Inc.
+- *
+- * This software is licensed under the terms of the GNU General Public
+- * License version 2, as published by the Free Software Foundation, and
+- * may be copied, distributed, and modified under those terms.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- */
+-
+-#ifndef _UAPI_LINUX_SW_SYNC_H
+-#define _UAPI_LINUX_SW_SYNC_H
+-
+-#include <linux/types.h>
+-
+-struct sw_sync_create_fence_data {
+-	__u32	value;
+-	char	name[32];
+-	__s32	fence; /* fd of new fence */
+-};
+-
+-#define SW_SYNC_IOC_MAGIC	'W'
+-
+-#define SW_SYNC_IOC_CREATE_FENCE	_IOWR(SW_SYNC_IOC_MAGIC, 0,\
+-		struct sw_sync_create_fence_data)
+-#define SW_SYNC_IOC_INC			_IOW(SW_SYNC_IOC_MAGIC, 1, __u32)
+-
+-#endif /* _UAPI_LINUX_SW_SYNC_H */
+diff --git a/drivers/staging/android/uapi/sync.h b/drivers/staging/android/uapi/sync.h
+deleted file mode 100644
+index e964c75..0000000
+--- a/drivers/staging/android/uapi/sync.h
++++ /dev/null
+@@ -1,97 +0,0 @@
+-/*
+- * Copyright (C) 2012 Google, Inc.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- */
+-
+-#ifndef _UAPI_LINUX_SYNC_H
+-#define _UAPI_LINUX_SYNC_H
+-
+-#include <linux/ioctl.h>
+-#include <linux/types.h>
+-
+-/**
+- * struct sync_merge_data - data passed to merge ioctl
+- * @fd2:	file descriptor of second fence
+- * @name:	name of new fence
+- * @fence:	returns the fd of the new fence to userspace
+- */
+-struct sync_merge_data {
+-	__s32	fd2; /* fd of second fence */
+-	char	name[32]; /* name of new fence */
+-	__s32	fence; /* fd on newly created fence */
+-};
+-
+-/**
+- * struct sync_pt_info - detailed sync_pt information
+- * @len:		length of sync_pt_info including any driver_data
+- * @obj_name:		name of parent sync_timeline
+- * @driver_name:	name of driver implementing the parent
+- * @status:		status of the sync_pt 0:active 1:signaled <0:error
+- * @timestamp_ns:	timestamp of status change in nanoseconds
+- * @driver_data:	any driver dependent data
+- */
+-struct sync_pt_info {
+-	__u32	len;
+-	char	obj_name[32];
+-	char	driver_name[32];
+-	__s32	status;
+-	__u64	timestamp_ns;
+-
+-	__u8	driver_data[0];
+-};
+-
+-/**
+- * struct sync_fence_info_data - data returned from fence info ioctl
+- * @len:	ioctl caller writes the size of the buffer its passing in.
+- *		ioctl returns length of sync_fence_data returned to userspace
+- *		including pt_info.
+- * @name:	name of fence
+- * @status:	status of fence. 1: signaled 0:active <0:error
+- * @pt_info:	a sync_pt_info struct for every sync_pt in the fence
+- */
+-struct sync_fence_info_data {
+-	__u32	len;
+-	char	name[32];
+-	__s32	status;
+-
+-	__u8	pt_info[0];
+-};
+-
+-#define SYNC_IOC_MAGIC		'>'
+-
+-/**
+- * DOC: SYNC_IOC_WAIT - wait for a fence to signal
+- *
+- * pass timeout in milliseconds.  Waits indefinitely timeout < 0.
+- */
+-#define SYNC_IOC_WAIT		_IOW(SYNC_IOC_MAGIC, 0, __s32)
+-
+-/**
+- * DOC: SYNC_IOC_MERGE - merge two fences
+- *
+- * Takes a struct sync_merge_data.  Creates a new fence containing copies of
+- * the sync_pts in both the calling fd and sync_merge_data.fd2.  Returns the
+- * new fence's fd in sync_merge_data.fence
+- */
+-#define SYNC_IOC_MERGE		_IOWR(SYNC_IOC_MAGIC, 1, struct sync_merge_data)
+-
+-/**
+- * DOC: SYNC_IOC_FENCE_INFO - get detailed information on a fence
+- *
+- * Takes a struct sync_fence_info_data with extra space allocated for pt_info.
+- * Caller should write the size of the buffer into len.  On return, len is
+- * updated to reflect the total size of the sync_fence_info_data including
+- * pt_info.
+- *
+- * pt_info is a buffer containing sync_pt_infos for every sync_pt in the fence.
+- * To iterate over the sync_pt_infos, use the sync_pt_info.len field.
+- */
+-#define SYNC_IOC_FENCE_INFO	_IOWR(SYNC_IOC_MAGIC, 2,\
+-	struct sync_fence_info_data)
+-
+-#endif /* _UAPI_LINUX_SYNC_H */
+diff --git a/include/uapi/Kbuild b/include/uapi/Kbuild
+index 245aa6e..7c415d0 100644
+--- a/include/uapi/Kbuild
++++ b/include/uapi/Kbuild
+@@ -13,3 +13,4 @@ header-y += drm/
+ header-y += xen/
+ header-y += scsi/
+ header-y += misc/
++header-y += sync/
+diff --git a/include/uapi/sync/Kbuild b/include/uapi/sync/Kbuild
+new file mode 100644
+index 0000000..2716ffe
+--- /dev/null
++++ b/include/uapi/sync/Kbuild
+@@ -0,0 +1,3 @@
++# sync Header export list
++header-y += sw_sync.h
++header-y += sync.h
+diff --git a/include/uapi/sync/sw_sync.h b/include/uapi/sync/sw_sync.h
+new file mode 100644
+index 0000000..9b5d486
+--- /dev/null
++++ b/include/uapi/sync/sw_sync.h
+@@ -0,0 +1,32 @@
++/*
++ * Copyright (C) 2012 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#ifndef _UAPI_LINUX_SW_SYNC_H
++#define _UAPI_LINUX_SW_SYNC_H
++
++#include <linux/types.h>
++
++struct sw_sync_create_fence_data {
++	__u32	value;
++	char	name[32];
++	__s32	fence; /* fd of new fence */
++};
++
++#define SW_SYNC_IOC_MAGIC	'W'
++
++#define SW_SYNC_IOC_CREATE_FENCE	_IOWR(SW_SYNC_IOC_MAGIC, 0,\
++		struct sw_sync_create_fence_data)
++#define SW_SYNC_IOC_INC			_IOW(SW_SYNC_IOC_MAGIC, 1, __u32)
++
++#endif /* _UAPI_LINUX_SW_SYNC_H */
+diff --git a/include/uapi/sync/sync.h b/include/uapi/sync/sync.h
+new file mode 100644
+index 0000000..e964c75
+--- /dev/null
++++ b/include/uapi/sync/sync.h
+@@ -0,0 +1,97 @@
++/*
++ * Copyright (C) 2012 Google, Inc.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#ifndef _UAPI_LINUX_SYNC_H
++#define _UAPI_LINUX_SYNC_H
++
++#include <linux/ioctl.h>
++#include <linux/types.h>
++
++/**
++ * struct sync_merge_data - data passed to merge ioctl
++ * @fd2:	file descriptor of second fence
++ * @name:	name of new fence
++ * @fence:	returns the fd of the new fence to userspace
++ */
++struct sync_merge_data {
++	__s32	fd2; /* fd of second fence */
++	char	name[32]; /* name of new fence */
++	__s32	fence; /* fd on newly created fence */
++};
++
++/**
++ * struct sync_pt_info - detailed sync_pt information
++ * @len:		length of sync_pt_info including any driver_data
++ * @obj_name:		name of parent sync_timeline
++ * @driver_name:	name of driver implementing the parent
++ * @status:		status of the sync_pt 0:active 1:signaled <0:error
++ * @timestamp_ns:	timestamp of status change in nanoseconds
++ * @driver_data:	any driver dependent data
++ */
++struct sync_pt_info {
++	__u32	len;
++	char	obj_name[32];
++	char	driver_name[32];
++	__s32	status;
++	__u64	timestamp_ns;
++
++	__u8	driver_data[0];
++};
++
++/**
++ * struct sync_fence_info_data - data returned from fence info ioctl
++ * @len:	ioctl caller writes the size of the buffer its passing in.
++ *		ioctl returns length of sync_fence_data returned to userspace
++ *		including pt_info.
++ * @name:	name of fence
++ * @status:	status of fence. 1: signaled 0:active <0:error
++ * @pt_info:	a sync_pt_info struct for every sync_pt in the fence
++ */
++struct sync_fence_info_data {
++	__u32	len;
++	char	name[32];
++	__s32	status;
++
++	__u8	pt_info[0];
++};
++
++#define SYNC_IOC_MAGIC		'>'
++
++/**
++ * DOC: SYNC_IOC_WAIT - wait for a fence to signal
++ *
++ * pass timeout in milliseconds.  Waits indefinitely timeout < 0.
++ */
++#define SYNC_IOC_WAIT		_IOW(SYNC_IOC_MAGIC, 0, __s32)
++
++/**
++ * DOC: SYNC_IOC_MERGE - merge two fences
++ *
++ * Takes a struct sync_merge_data.  Creates a new fence containing copies of
++ * the sync_pts in both the calling fd and sync_merge_data.fd2.  Returns the
++ * new fence's fd in sync_merge_data.fence
++ */
++#define SYNC_IOC_MERGE		_IOWR(SYNC_IOC_MAGIC, 1, struct sync_merge_data)
++
++/**
++ * DOC: SYNC_IOC_FENCE_INFO - get detailed information on a fence
++ *
++ * Takes a struct sync_fence_info_data with extra space allocated for pt_info.
++ * Caller should write the size of the buffer into len.  On return, len is
++ * updated to reflect the total size of the sync_fence_info_data including
++ * pt_info.
++ *
++ * pt_info is a buffer containing sync_pt_infos for every sync_pt in the fence.
++ * To iterate over the sync_pt_infos, use the sync_pt_info.len field.
++ */
++#define SYNC_IOC_FENCE_INFO	_IOWR(SYNC_IOC_MAGIC, 2,\
++	struct sync_fence_info_data)
++
++#endif /* _UAPI_LINUX_SYNC_H */
+-- 
+1.7.1
+

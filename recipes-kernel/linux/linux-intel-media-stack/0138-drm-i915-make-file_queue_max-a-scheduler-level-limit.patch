@@ -1,0 +1,140 @@
+From 28ef723a8d8d7f74f004c95554b23387537e4033 Mon Sep 17 00:00:00 2001
+From: Hong Liu <hong.liu@intel.com>
+Date: Mon, 11 Jul 2016 13:41:26 +0800
+Subject: [PATCH 138/153] drm/i915: make file_queue_max a scheduler level limit
+
+Currently file_queue_max is a per-file limit, this allows each opener
+of i915 card to queue up to file_queue_max requests to scheduler.
+In the multi-process case, this will queue too many requests to the
+scheduler, causing large CPU time increasing.
+
+Make the file_queue_max limit to scheduler level to match the multi-thread
+case.
+
+Change-Id: Iff1f8ff9d15396f88afb02209b9aa49a76c6fa51
+Signed-off-by: Hong Liu <hong.liu@intel.com>
+---
+ drivers/gpu/drm/i915/i915_drv.h       |    2 --
+ drivers/gpu/drm/i915/i915_scheduler.c |   31 +++++++++++++++----------------
+ drivers/gpu/drm/i915/i915_scheduler.h |    1 +
+ 3 files changed, 16 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 2ef27db..cb1d8d0 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -347,8 +347,6 @@ struct drm_i915_file_private {
+ 
+ 	struct intel_engine_cs *bsd_ring;
+ 
+-	u32 scheduler_queue_length;
+-
+         struct drm_i915_perfmon_file perfmon;
+ };
+ 
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.c b/drivers/gpu/drm/i915/i915_scheduler.c
+index 6ea6a28..ac83b5e 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.c
++++ b/drivers/gpu/drm/i915/i915_scheduler.c
+@@ -193,6 +193,7 @@ int i915_scheduler_init(struct drm_device *dev)
+ 	scheduler->priority_level_preempt = 900;
+ 	scheduler->min_flying             = 5;
+ 	scheduler->file_queue_max         = 256;
++	atomic_set(&scheduler->queue_len, 0);
+ 	init_waitqueue_head(&scheduler->busy_queue);
+ 	scheduler->dump_flags             = I915_SF_DUMP_FORCE   |
+ 					    I915_SF_DUMP_DETAILS |
+@@ -750,23 +751,19 @@ static int i915_scheduler_submit_unlocked(struct intel_engine_cs *ring)
+  * i915_scheduler_file_queue_inc - Increment the file's request queue count.
+  * @file: File object to process.
+  */
+-static void i915_scheduler_file_queue_inc(struct drm_file *file)
++static void i915_scheduler_file_queue_inc(struct i915_scheduler *scheduler)
+ {
+-	struct drm_i915_file_private *file_priv = file->driver_priv;
+-
+-	file_priv->scheduler_queue_length++;
++	atomic_inc(&scheduler->queue_len);
+ }
+ 
+ /**
+  * i915_scheduler_file_queue_dec - Decrement the file's request queue count.
+  * @file: File object to process.
+  */
+-static void i915_scheduler_file_queue_dec(struct drm_file *file)
++static void i915_scheduler_file_queue_dec(struct i915_scheduler *scheduler)
+ {
+-	struct drm_i915_file_private *file_priv = file->driver_priv;
+-
+-	file_priv->scheduler_queue_length--;
+-	wake_up(&file_priv->dev_priv->scheduler->busy_queue);
++	atomic_dec(&scheduler->queue_len);
++	wake_up(&scheduler->busy_queue);
+ }
+ 
+ static int i915_generate_dependencies(struct i915_scheduler *scheduler,
+@@ -977,7 +974,7 @@ int i915_scheduler_queue_execbuffer(struct i915_scheduler_queue_entry *qe)
+ 
+ 	list_add_tail(&node->link, &scheduler->node_queue[ring->id]);
+ 
+-	i915_scheduler_file_queue_inc(node->params.file);
++	i915_scheduler_file_queue_inc(scheduler);
+ 
+ 	not_flying = i915_scheduler_count_flying(scheduler, ring) <
+ 						 scheduler->min_flying;
+@@ -1197,7 +1194,7 @@ static bool i915_scheduler_remove(struct i915_scheduler *scheduler,
+ 
+ 		/* Likewise clean up the file pointer. */
+ 		if (node->params.file) {
+-			i915_scheduler_file_queue_dec(node->params.file);
++			i915_scheduler_file_queue_dec(scheduler);
+ 			node->params.file = NULL;
+ 		}
+ 
+@@ -1309,16 +1306,18 @@ bool i915_scheduler_file_queue_wait(struct drm_file *file)
+ 	struct i915_scheduler *scheduler = dev_priv->scheduler;
+ 	int ret;
+ 
+-	if (file_priv->scheduler_queue_length < scheduler->file_queue_max)
+-		return false;
++#define COND (atomic_read(&scheduler->queue_len) < scheduler->file_queue_max)
+ 
+-	ret = wait_event_interruptible(scheduler->busy_queue,
+-		file_priv->scheduler_queue_length < scheduler->file_queue_max);
++	if (COND)
++		return false;
+ 
++	ret = wait_event_interruptible(scheduler->busy_queue, COND);
+ 	if (ret < 0)
+ 		return true;
+ 
+ 	return false;
++
++#undef COND
+ }
+ 
+ static int i915_scheduler_dump_locked(struct intel_engine_cs *ring,
+@@ -1847,7 +1846,7 @@ void i915_scheduler_closefile(struct drm_device *dev, struct drm_file *file)
+ 						 i915_qe_state_str(node),
+ 						 ring->name);
+ 
+-			i915_scheduler_file_queue_dec(node->params.file);
++			i915_scheduler_file_queue_dec(scheduler);
+ 			node->params.file = NULL;
+ 		}
+ 	}
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.h b/drivers/gpu/drm/i915/i915_scheduler.h
+index 9c023ec..279e2c7 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.h
++++ b/drivers/gpu/drm/i915/i915_scheduler.h
+@@ -137,6 +137,7 @@ struct i915_scheduler {
+ 	int32_t priority_level_preempt;
+ 	uint32_t min_flying;
+ 	uint32_t file_queue_max;
++	atomic_t queue_len;
+ 	wait_queue_head_t busy_queue;
+ 	uint32_t dump_flags;
+ 
+-- 
+1.7.1
+

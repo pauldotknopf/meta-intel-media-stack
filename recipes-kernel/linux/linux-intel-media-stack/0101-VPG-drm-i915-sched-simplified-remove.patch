@@ -1,0 +1,130 @@
+From 49f763d417d784a07d376c10bdb4c9b33f0b0728 Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Fri, 4 Mar 2016 12:22:39 +0000
+Subject: [PATCH 101/153] [VPG]: drm/i915/sched: simplified remove
+
+Simplify the i915_scheduler_remove function
+---
+ drivers/gpu/drm/i915/i915_scheduler.c |   47 ++------------------------------
+ drivers/gpu/drm/i915/i915_trace.h     |    9 ++----
+ 2 files changed, 6 insertions(+), 50 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.c b/drivers/gpu/drm/i915/i915_scheduler.c
+index 4226d68..75260bd 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.c
++++ b/drivers/gpu/drm/i915/i915_scheduler.c
+@@ -1155,61 +1155,20 @@ static bool i915_scheduler_remove(struct i915_scheduler *scheduler,
+ 	struct i915_scheduler_queue_entry *node, *node_next;
+ 	int flying = 0, queued = 0;
+ 	bool do_submit;
+-	uint32_t min_seqno;
+ 
+ 	spin_lock_irq(&scheduler->lock);
+ 
+-	/*
+-	 * In the case where the system is idle, starting 'min_seqno' from a big
+-	 * number will cause all nodes to be removed as they are now back to
+-	 * being in-order. However, this will be a problem if the last one to
+-	 * complete was actually out-of-order as the ring seqno value will be
+-	 * lower than one or more completed buffers. Thus code looking for the
+-	 * completion of said buffers will wait forever.
+-	 * Instead, use the hardware seqno as the starting point. This means
+-	 * that some buffers might be kept around even in a completely idle
+-	 * system but it should guarantee that no-one ever gets confused when
+-	 * waiting for buffer completion.
+-	 */
+-	min_seqno = ring->get_seqno(ring, true);
+-
+ 	for_each_scheduler_node(node, ring->id) {
+ 		if (I915_SQS_IS_QUEUED(node))
+ 			queued++;
+ 		else if (I915_SQS_IS_FLYING(node))
+ 			flying++;
+-		else if (I915_SQS_IS_COMPLETE(node))
+-			continue;
+-
+-		if (node->params.request->seqno == 0)
+-			continue;
+-
+-		if (!i915_seqno_passed(node->params.request->seqno, min_seqno))
+-			min_seqno = node->params.request->seqno;
+ 	}
+ 
+ 	INIT_LIST_HEAD(remove);
+ 	list_for_each_entry_safe(node, node_next, &scheduler->node_queue[ring->id], link) {
+-		/*
+-		 * Only remove completed nodes which have a lower seqno than
+-		 * all pending nodes. While there is the possibility of the
+-		 * ring's seqno counting backwards, all higher buffers must
+-		 * be remembered so that the 'i915_seqno_passed()' test can
+-		 * report that they have in fact passed.
+-		 *
+-		 * NB: This is not true for 'dead' nodes. The GPU reset causes
+-		 * the software seqno to restart from its initial value. Thus
+-		 * the dead nodes must be removed even though their seqno values
+-		 * are potentially vastly greater than the current ring seqno.
+-		 */
+ 		if (!I915_SQS_IS_COMPLETE(node))
+-			continue;
+-
+-		if (node->status != I915_SQS_DEAD) {
+-			if (i915_seqno_passed(node->params.request->seqno, min_seqno) &&
+-			    (node->params.request->seqno != min_seqno))
+-				continue;
+-		}
++			break;
+ 
+ 		list_del(&node->link);
+ 		list_add(&node->link, remove);
+@@ -1231,7 +1190,7 @@ static bool i915_scheduler_remove(struct i915_scheduler *scheduler,
+ 	 * Release the interrupt reference count if there are no longer any
+ 	 * nodes to worry about.
+ 	 */
+-	if (!flying && !queued &&
++	if (list_empty(&scheduler->node_queue[ring->id]) &&
+ 	    (scheduler->flags[ring->id] & I915_SF_INTERRUPTS_ENABLED)) {
+ 		ring->irq_put(ring);
+ 		scheduler->flags[ring->id] &= ~I915_SF_INTERRUPTS_ENABLED;
+@@ -1240,7 +1199,7 @@ static bool i915_scheduler_remove(struct i915_scheduler *scheduler,
+ 	/* Launch more packets now? */
+ 	do_submit = (queued > 0) && (flying < scheduler->min_flying);
+ 
+-	trace_i915_scheduler_remove(ring, min_seqno, do_submit);
++	trace_i915_scheduler_remove(ring, do_submit);
+ 
+ 	spin_unlock_irq(&scheduler->lock);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_trace.h b/drivers/gpu/drm/i915/i915_trace.h
+index 8d3aec3..d6af52d 100644
+--- a/drivers/gpu/drm/i915/i915_trace.h
++++ b/drivers/gpu/drm/i915/i915_trace.h
+@@ -916,23 +916,20 @@ TRACE_EVENT(i915_scheduler_landing,
+ 
+ TRACE_EVENT(i915_scheduler_remove,
+ 	    TP_PROTO(struct intel_engine_cs *ring,
+-		     u32 min_seqno, bool do_submit),
+-	    TP_ARGS(ring, min_seqno, do_submit),
++		     bool do_submit),
++	    TP_ARGS(ring, do_submit),
+ 
+ 	    TP_STRUCT__entry(
+ 			     __field(u32, ring)
+-			     __field(u32, min_seqno)
+ 			     __field(bool, do_submit)
+ 			     ),
+ 
+ 	    TP_fast_assign(
+ 			   __entry->ring      = ring->id;
+-			   __entry->min_seqno = min_seqno;
+ 			   __entry->do_submit = do_submit;
+ 			   ),
+ 
+-	    TP_printk("ring=%d, min_seqno = %d, do_submit=%d",
+-		      __entry->ring, __entry->min_seqno, __entry->do_submit)
++	    TP_printk("ring=%d, do_submit=%d", __entry->ring, __entry->do_submit)
+ );
+ 
+ TRACE_EVENT(i915_scheduler_destroy,
+-- 
+1.7.1
+

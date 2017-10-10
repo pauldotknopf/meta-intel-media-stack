@@ -1,0 +1,26 @@
+From 9529638b06d025ff68f2de4ef7f87d4884fb2e1c Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Fri, 8 Apr 2016 00:51:24 -0400
+Subject: [PATCH 111/153] Revert "[VPG]: drm/i915: evict vm when destroy context"
+
+This reverts commit c4949c328bb33ed2d493dd2cacaa37988b0756a2.
+---
+ drivers/gpu/drm/i915/i915_gem_context.c |    2 --
+ 1 files changed, 0 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index e8cf817..4bde468 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -915,8 +915,6 @@ int i915_gem_context_destroy_ioctl(struct drm_device *dev, void *data,
+ 	}
+ 
+ 	idr_remove(&ctx->file_priv->context_idr, ctx->user_handle);
+-	if (ctx->ppgtt)
+-		i915_gem_evict_vm(&ctx->ppgtt->base, true);
+ 	i915_gem_context_unreference(ctx);
+ 	mutex_unlock(&dev->struct_mutex);
+ 
+-- 
+1.7.1
+

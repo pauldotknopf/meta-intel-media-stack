@@ -1,0 +1,262 @@
+From 2113e3b7f21a8af118e6dc44d0dc48e15c69707f Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Wed, 8 Jul 2015 17:28:56 +0100
+Subject: [PATCH 011/153] drm/i915: Delay the freeing of requests until retire time
+
+The request structure is reference counted. When the count reached
+zero, the request was immediately freed and all associated objects
+were unrefereced/unallocated. This meant that the driver mutex lock
+must be held at the point where the count reaches zero. This was fine
+while all references were held internally to the driver. However, the
+plan is to allow the underlying fence object (and hence the request
+itself) to be returned to other drivers and to userland. External
+users cannot be expected to acquire a driver private mutex lock.
+
+Rather than attempt to disentangle the request structure from the
+driver mutex lock, the decsion was to defer the free code until a
+later (safer) point. Hence this patch changes the unreference callback
+to merely move the request onto a delayed free list. The driver's
+retire worker thread will then process the list and actually call the
+free function on the requests.
+
+v2: New patch in series.
+
+v3: Updated after review comments by Tvrtko Ursulin. Rename list nodes
+to 'link' rather than 'list'. Update list processing to be more
+efficient/safer with respect to spinlocks.
+
+v4: Changed to use basic spinlocks rather than IRQ ones - missed
+update from earlier feedback by Tvrtko.
+
+v5: Improved a comment to keep the style checker happy.
+
+For: VIZ-5190
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+
+Conflicts:
+	drivers/gpu/drm/i915/i915_gem.c
+---
+ drivers/gpu/drm/i915/i915_drv.h         |   22 ++---------------
+ drivers/gpu/drm/i915/i915_gem.c         |   39 +++++++++++++++++++++++++++----
+ drivers/gpu/drm/i915/intel_display.c    |    2 +-
+ drivers/gpu/drm/i915/intel_lrc.c        |    2 +
+ drivers/gpu/drm/i915/intel_pm.c         |    2 +-
+ drivers/gpu/drm/i915/intel_ringbuffer.c |    2 +
+ drivers/gpu/drm/i915/intel_ringbuffer.h |    7 +++++
+ 7 files changed, 50 insertions(+), 26 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index dd6ae38..f946ad9 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2200,14 +2200,9 @@ void i915_gem_track_fb(struct drm_i915_gem_object *old,
+  * initial reference taken using kref_init
+  */
+ struct drm_i915_gem_request {
+-	/**
+-	 * Underlying object for implementing the signal/wait stuff.
+-	 * NB: Never return this fence object to user land! It is unsafe to
+-	 * let anything outside of the i915 driver get hold of the fence
+-	 * object as the clean up when decrementing the reference count
+-	 * requires holding the driver mutex lock.
+-	 */
++	/** Underlying object for implementing the signal/wait stuff. */
+ 	struct fence fence;
++	struct list_head delayed_free_link;
+ 
+ 	/** On Which ring this request was generated */
+ 	struct drm_i915_private *i915;
+@@ -2329,21 +2324,10 @@ i915_gem_request_reference(struct drm_i915_gem_request *req)
+ static inline void
+ i915_gem_request_unreference(struct drm_i915_gem_request *req)
+ {
+-	WARN_ON(!mutex_is_locked(&req->ring->dev->struct_mutex));
+-	fence_put(&req->fence);
+-}
+-
+-static inline void
+-i915_gem_request_unreference__unlocked(struct drm_i915_gem_request *req)
+-{
+-	struct drm_device *dev;
+-
+ 	if (!req)
+ 		return;
+ 
+-	dev = req->ring->dev;
+-	if (kref_put_mutex(&req->fence.refcount, fence_release, &dev->struct_mutex))
+-		mutex_unlock(&dev->struct_mutex);
++	fence_put(&req->fence);
+ }
+ 
+ static inline void i915_gem_request_assign(struct drm_i915_gem_request **pdst,
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 44668fa..40fe19b 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2673,10 +2673,26 @@ static void i915_set_reset_status(struct drm_i915_private *dev_priv,
+ 	}
+ }
+ 
+-static void i915_gem_request_free(struct fence *req_fence)
++static void i915_gem_request_release(struct fence *req_fence)
+ {
+ 	struct drm_i915_gem_request *req = container_of(req_fence,
+ 						 typeof(*req), fence);
++	struct intel_engine_cs *ring = req->ring;
++	struct drm_i915_private *dev_priv = to_i915(ring->dev);
++
++	/*
++	 * Need to add the request to a deferred dereference list to be
++	 * processed at a mutex lock safe time.
++	 */
++	spin_lock(&ring->delayed_free_lock);
++	list_add_tail(&req->delayed_free_link, &ring->delayed_free_list);
++	spin_unlock(&ring->delayed_free_lock);
++
++	queue_delayed_work(dev_priv->wq, &dev_priv->mm.retire_work, 0);
++}
++
++static void i915_gem_request_free(struct drm_i915_gem_request *req)
++{
+ 	struct intel_context *ctx = req->ctx;
+ 
+ 	WARN_ON(!mutex_is_locked(&req->ring->dev->struct_mutex));
+@@ -2756,7 +2772,7 @@ static const struct fence_ops i915_gem_request_fops = {
+ 	.enable_signaling	= i915_gem_request_enable_signaling,
+ 	.signaled		= i915_gem_request_is_completed,
+ 	.wait			= fence_default_wait,
+-	.release		= i915_gem_request_free,
++	.release		= i915_gem_request_release,
+ 	.get_driver_name	= i915_gem_request_get_driver_name,
+ 	.get_timeline_name	= i915_gem_request_get_timeline_name,
+ 	.fence_value_str	= i915_gem_request_fence_value_str,
+@@ -3006,6 +3022,9 @@ void i915_gem_reset(struct drm_device *dev)
+ void
+ i915_gem_retire_requests_ring(struct intel_engine_cs *ring)
+ {
++	struct drm_i915_gem_request *req, *req_next;
++	LIST_HEAD(list_head);
++
+ 	WARN_ON(i915_verify_lists(ring->dev));
+ 
+ 	/* Retire requests first as we use it above for the early return.
+@@ -3049,6 +3068,15 @@ i915_gem_retire_requests_ring(struct intel_engine_cs *ring)
+ 		i915_gem_request_assign(&ring->trace_irq_req, NULL);
+ 	}
+ 
++	/* Really free any requests that were recently unreferenced */
++	spin_lock(&ring->delayed_free_lock);
++	list_splice_init(&ring->delayed_free_list, &list_head);
++	spin_unlock(&ring->delayed_free_lock);
++	list_for_each_entry_safe(req, req_next, &list_head, delayed_free_link) {
++		list_del(&req->delayed_free_link);
++		i915_gem_request_free(req);
++	}
++
+ 	WARN_ON(i915_verify_lists(ring->dev));
+ }
+ 
+@@ -3238,8 +3266,8 @@ i915_gem_wait_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
+ 		if (ret == 0)
+ 			ret = __i915_wait_request(req[i], reset_counter, true,
+ 						  args->timeout_ns > 0 ? &args->timeout_ns : NULL,
+-						  file->driver_priv);
+-		i915_gem_request_unreference__unlocked(req[i]);
++						  to_rps_client(file));
++		i915_gem_request_unreference(req[i]);
+ 	}
+ 	return ret;
+ 
+@@ -4240,7 +4268,7 @@ i915_gem_ring_throttle(struct drm_device *dev, struct drm_file *file)
+ 	if (ret == 0)
+ 		queue_delayed_work(dev_priv->wq, &dev_priv->mm.retire_work, 0);
+ 
+-	i915_gem_request_unreference__unlocked(target);
++	i915_gem_request_unreference(target);
+ 
+ 	return ret;
+ }
+@@ -5110,6 +5138,7 @@ init_ring_lists(struct intel_engine_cs *ring)
+ {
+ 	INIT_LIST_HEAD(&ring->active_list);
+ 	INIT_LIST_HEAD(&ring->request_list);
++	INIT_LIST_HEAD(&ring->delayed_free_list);
+ }
+ 
+ void
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 2876536..95d24e3 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -11287,7 +11287,7 @@ static void intel_mmio_flip_work_func(struct work_struct *work)
+ 					    mmio_flip->crtc->reset_counter,
+ 					    false, NULL,
+ 					    &mmio_flip->i915->rps.mmioflips));
+-		i915_gem_request_unreference__unlocked(mmio_flip->req);
++		i915_gem_request_unreference(mmio_flip->req);
+ 	}
+ 
+ 	intel_do_mmio_flip(mmio_flip);
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 2a46faf..a2525ec 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -1950,7 +1950,9 @@ static int logical_ring_init(struct drm_device *dev, struct intel_engine_cs *rin
+ 	ring->dev = dev;
+ 	INIT_LIST_HEAD(&ring->active_list);
+ 	INIT_LIST_HEAD(&ring->request_list);
++	INIT_LIST_HEAD(&ring->delayed_free_list);
+ 	spin_lock_init(&ring->fence_lock);
++	spin_lock_init(&ring->delayed_free_lock);
+ 	i915_gem_batch_pool_init(dev, &ring->batch_pool);
+ 	init_waitqueue_head(&ring->irq_queue);
+ 
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 50b3811..9306f1c 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -7292,7 +7292,7 @@ static void __intel_rps_boost_work(struct work_struct *work)
+ 		gen6_rps_boost(to_i915(req->ring->dev), NULL,
+ 			       req->emitted_jiffies);
+ 
+-	i915_gem_request_unreference__unlocked(req);
++	i915_gem_request_unreference(req);
+ 	kfree(boost);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.c b/drivers/gpu/drm/i915/intel_ringbuffer.c
+index 9c0914f..bf1cda5 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.c
+@@ -2116,7 +2116,9 @@ static int intel_init_ring_buffer(struct drm_device *dev,
+ 	INIT_LIST_HEAD(&ring->request_list);
+ 	INIT_LIST_HEAD(&ring->execlist_queue);
+ 	INIT_LIST_HEAD(&ring->buffers);
++	INIT_LIST_HEAD(&ring->delayed_free_list);
+ 	spin_lock_init(&ring->fence_lock);
++	spin_lock_init(&ring->delayed_free_lock);
+ 	i915_gem_batch_pool_init(dev, &ring->batch_pool);
+ 	memset(ring->semaphore.sync_seqno, 0, sizeof(ring->semaphore.sync_seqno));
+ 
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index 49adabd..64a439a 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -303,6 +303,13 @@ struct  intel_engine_cs {
+ 	 */
+ 	u32 last_submitted_seqno;
+ 
++	/*
++	 * Deferred free list to allow unreferencing requests from interrupt
++	 * contexts and from outside of the i915 driver.
++	 */
++	struct list_head delayed_free_list;
++	spinlock_t delayed_free_lock;
++
+ 	bool gpu_caches_dirty;
+ 
+ 	wait_queue_head_t irq_queue;
+-- 
+1.7.1
+

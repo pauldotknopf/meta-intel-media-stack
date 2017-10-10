@@ -1,0 +1,29 @@
+From 2bdcf5ea81f9532ec23c18940a301f3891b1bf0b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Micha=C5=82=20Winiarski?= <michal.winiarski@intel.com>
+Date: Wed, 21 Oct 2015 13:11:24 +0200
+Subject: [PATCH 066/153] [VPG]: drm/i915: Add L3_LRA_1 Register to cmdparser whitelist
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Change-Id: Icf0a15895079ae18eebd74462da84ab862698f32
+Signed-off-by: Michał Winiarski <michal.winiarski@intel.com>
+---
+ drivers/gpu/drm/i915/i915_cmd_parser.c |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_cmd_parser.c b/drivers/gpu/drm/i915/i915_cmd_parser.c
+index db58c8d..6908ce7 100644
+--- a/drivers/gpu/drm/i915/i915_cmd_parser.c
++++ b/drivers/gpu/drm/i915/i915_cmd_parser.c
+@@ -451,6 +451,7 @@ static const struct drm_i915_reg_descriptor gen7_render_regs[] = {
+ 	REG32(GEN7_GPGPU_DISPATCHDIMX),
+ 	REG32(GEN7_GPGPU_DISPATCHDIMY),
+ 	REG32(GEN7_GPGPU_DISPATCHDIMZ),
++	REG32(GEN7_LRA_LIMITS(1)),
+ 	REG64(GEN7_SO_NUM_PRIMS_WRITTEN(0)),
+ 	REG64(GEN7_SO_NUM_PRIMS_WRITTEN(1)),
+ 	REG64(GEN7_SO_NUM_PRIMS_WRITTEN(2)),
+-- 
+1.7.1
+

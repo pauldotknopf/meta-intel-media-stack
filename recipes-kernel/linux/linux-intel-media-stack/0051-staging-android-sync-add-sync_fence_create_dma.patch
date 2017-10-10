@@ -1,0 +1,93 @@
+From 954a268fd04fb8215bfc7b754659df90f42d0ae8 Mon Sep 17 00:00:00 2001
+From: Maarten Lankhorst <maarten.lankhorst@canonical.com>
+Date: Wed, 3 Dec 2014 11:49:05 -0800
+Subject: [PATCH 051/153] staging/android/sync: add sync_fence_create_dma
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This allows users of dma fences to create a android fence.
+
+v0.2: Added kerneldoc. (Tvrtko Ursulin).
+
+v0.4: Updated comments from review feedback by Maarten.
+
+Signed-off-by: Maarten Lankhorst <maarten.lankhorst@canonical.com>
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+Cc: Daniel Vetter <daniel@ffwll.ch>
+Cc: Jesse Barnes <jbarnes@virtuousgeek.org>
+Cc: devel@driverdev.osuosl.org
+Cc: Riley Andrews <riandrews@android.com>
+Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Cc: Arve Hjønnevåg <arve@android.com>
+Cc: Gustavo Padovan <gustavo.padovan@collabora.co.uk>
+Reviewed-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+Tested-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+---
+ drivers/staging/android/sync.c |   13 +++++++++----
+ drivers/staging/android/sync.h |   10 ++++++++++
+ 2 files changed, 19 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/staging/android/sync.c b/drivers/staging/android/sync.c
+index f83e00c..7f0e919 100644
+--- a/drivers/staging/android/sync.c
++++ b/drivers/staging/android/sync.c
+@@ -188,7 +188,7 @@ static void fence_check_cb_func(struct fence *f, struct fence_cb *cb)
+ }
+ 
+ /* TODO: implement a create which takes more that one sync_pt */
+-struct sync_fence *sync_fence_create(const char *name, struct sync_pt *pt)
++struct sync_fence *sync_fence_create_dma(const char *name, struct fence *pt)
+ {
+ 	struct sync_fence *fence;
+ 
+@@ -199,16 +199,21 @@ struct sync_fence *sync_fence_create(const char *name, struct sync_pt *pt)
+ 	fence->num_fences = 1;
+ 	atomic_set(&fence->status, 1);
+ 
+-	fence->cbs[0].sync_pt = &pt->base;
++	fence->cbs[0].sync_pt = pt;
+ 	fence->cbs[0].fence = fence;
+-	if (fence_add_callback(&pt->base, &fence->cbs[0].cb,
+-			       fence_check_cb_func))
++	if (fence_add_callback(pt, &fence->cbs[0].cb, fence_check_cb_func))
+ 		atomic_dec(&fence->status);
+ 
+ 	sync_fence_debug_add(fence);
+ 
+ 	return fence;
+ }
++EXPORT_SYMBOL(sync_fence_create_dma);
++
++struct sync_fence *sync_fence_create(const char *name, struct sync_pt *pt)
++{
++	return sync_fence_create_dma(name, &pt->base);
++}
+ EXPORT_SYMBOL(sync_fence_create);
+ 
+ struct sync_fence *sync_fence_fdget(int fd)
+diff --git a/drivers/staging/android/sync.h b/drivers/staging/android/sync.h
+index 61f8a3a..afa0752 100644
+--- a/drivers/staging/android/sync.h
++++ b/drivers/staging/android/sync.h
+@@ -254,6 +254,16 @@ void sync_pt_free(struct sync_pt *pt);
+  */
+ struct sync_fence *sync_fence_create(const char *name, struct sync_pt *pt);
+ 
++/**
++ * sync_fence_create_dma() - creates a sync fence from dma-fence
++ * @name:	name of fence to create
++ * @pt:	dma-fence to add to the fence
++ *
++ * Creates a fence containg @pt.  Once this is called, the fence takes
++ * ownership of @pt.
++ */
++struct sync_fence *sync_fence_create_dma(const char *name, struct fence *pt);
++
+ /*
+  * API for sync_fence consumers
+  */
+-- 
+1.7.1
+

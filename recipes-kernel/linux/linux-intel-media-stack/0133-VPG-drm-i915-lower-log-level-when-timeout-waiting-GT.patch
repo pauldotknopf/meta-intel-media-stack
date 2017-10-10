@@ -1,0 +1,29 @@
+From a9bc44f6d4767b8029878e385178505f2686550f Mon Sep 17 00:00:00 2001
+From: Hong Liu <hong.liu@intel.com>
+Date: Thu, 30 Jun 2016 16:27:04 +0800
+Subject: [PATCH 133/153] [VPG]: drm/i915: lower log level when timeout waiting GT thread status
+
+We see error log when waiting for GT thread c0, but it doesn't impact
+test results. Downgrade the error log level to avoid false alarm.
+
+Signed-off-by: Hong Liu <hong.liu@intel.com>
+---
+ drivers/gpu/drm/i915/intel_uncore.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_uncore.c b/drivers/gpu/drm/i915/intel_uncore.c
+index c8d5a62..23e9e06 100644
+--- a/drivers/gpu/drm/i915/intel_uncore.c
++++ b/drivers/gpu/drm/i915/intel_uncore.c
+@@ -189,7 +189,7 @@ static void __gen6_gt_wait_for_thread_c0(struct drm_i915_private *dev_priv)
+ 	 */
+ 	if (wait_for_atomic_us((__raw_i915_read32(dev_priv, GEN6_GT_THREAD_STATUS_REG) &
+ 				GEN6_GT_THREAD_STATUS_CORE_MASK) == 0, 500))
+-		DRM_ERROR("GT thread status wait timed out\n");
++		DRM_DEBUG_DRIVER("GT thread status wait timed out\n");
+ }
+ 
+ static void fw_domains_get_with_thread_status(struct drm_i915_private *dev_priv,
+-- 
+1.7.1
+

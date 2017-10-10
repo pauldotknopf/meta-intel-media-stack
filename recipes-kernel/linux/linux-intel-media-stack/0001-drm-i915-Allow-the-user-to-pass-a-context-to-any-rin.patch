@@ -1,0 +1,36 @@
+From a62f8e9e87d9efe7f1285fdbf0614e24d5131bd9 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 11 Jan 2016 11:01:03 +0000
+Subject: [PATCH 001/153] drm/i915: Allow the user to pass a context to any ring
+
+With full-ppgtt, we want the user to have full control over their memory
+layout, with a separate instance per context. Forcing them to use a
+shared memory layout for !RCS not only duplicates the amount of work we
+have to do, but also defeats the memory segregation on offer.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+---
+ drivers/gpu/drm/i915/i915_gem_execbuffer.c |    5 +----
+ 1 files changed, 1 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+index 6ed7d63..ac1d220 100644
+--- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+@@ -1017,12 +1017,9 @@ static struct intel_context *
+ i915_gem_validate_context(struct drm_device *dev, struct drm_file *file,
+ 			  struct intel_engine_cs *ring, const u32 ctx_id)
+ {
+-	struct intel_context *ctx = NULL;
++	struct intel_context *ctx;
+ 	struct i915_ctx_hang_stats *hs;
+ 
+-	if (ring->id != RCS && ctx_id != DEFAULT_CONTEXT_HANDLE)
+-		return ERR_PTR(-EINVAL);
+-
+ 	ctx = i915_gem_context_get(file->driver_priv, ctx_id);
+ 	if (IS_ERR(ctx))
+ 		return ctx;
+-- 
+1.7.1
+

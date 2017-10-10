@@ -1,0 +1,63 @@
+From f14719340b7c7c1a772c081d97cb441d5f4336a4 Mon Sep 17 00:00:00 2001
+From: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Date: Mon, 1 Feb 2016 10:46:14 +0000
+Subject: [PATCH 112/153] drm/i915: Keep the per-object list of VMAs under control
+
+Where objects are shared across contexts and heavy rendering
+is in progress, execlist retired request queue will grow
+unbound until the GPU is idle enough for the retire worker
+to run and call intel_execlists_retire_requests.
+
+With some workloads, like for example gem_close_race, that
+never happens causing the shared object VMA list to grow to
+epic proportions, and in turn causes retirement call sites to
+spend linearly more and more time walking the obj->vma_list.
+
+End result is the above mentioned test case taking ten minutes
+to complete and using up more than a GiB of RAM just for the VMA
+objects.
+
+If we instead trigger the execlist house keeping a bit more
+often, obj->vma_list will be kept in check by the virtue of
+context cleanup running and zapping the inactive VMAs.
+
+This makes the test case an order of magnitude faster and brings
+memory use back to normal.
+
+This also makes the code more self-contained since the
+intel_execlists_retire_requests call-site is now in a more
+appropriate place and implementation leakage is somewhat
+reduced.
+
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Testcase: igt/gem_close_race/gem_close_race
+---
+ drivers/gpu/drm/i915/i915_gem.c |    5 +++--
+ 1 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index b23c747..f694f97 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -3488,6 +3488,9 @@ i915_gem_retire_requests_ring(struct intel_engine_cs *ring)
+ 		}
+ 	}
+ 
++	if (i915.enable_execlists)
++		intel_execlists_retire_requests(ring);
++
+ 	WARN_ON(i915_verify_lists(ring->dev));
+ }
+ 
+@@ -3508,8 +3511,6 @@ i915_gem_retire_requests(struct drm_device *dev)
+ 			spin_lock_irqsave(&ring->execlist_lock, flags);
+ 			idle &= list_empty(&ring->execlist_queue);
+ 			spin_unlock_irqrestore(&ring->execlist_lock, flags);
+-
+-			intel_execlists_retire_requests(ring);
+ 		}
+ 	}
+ 
+-- 
+1.7.1
+

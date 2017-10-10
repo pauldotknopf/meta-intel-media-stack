@@ -1,4 +1,4 @@
-SUMMARY = "Video Acceleration (VA) API Staging for Linux"
+SUMMARY = "Video Acceleration (VA) API for Linux"
 DESCRIPTION = "Video Acceleration API (VA API) is a library (libVA) \
 and API specification which enables and provides access to graphics \
 hardware (GPU) acceleration for video processing on Linux and UNIX \
@@ -10,31 +10,26 @@ limited to GPUs or Intel specific hardware, as other hardware and \
 manufacturers can also freely use this API for hardware accelerated \
 video decoding."
 
-HOMEPAGE = "http://www.freedesktop.org/wiki/Software/vaapi"
-BUGTRACKER = "https://bugs.freedesktop.org"
+HOMEPAGE = "https://01.org/linuxmedia/vaapi"
+BUGTRACKER = "https://github.com/01org/libva/issues"
 
 SECTION = "x11"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://COPYING;md5=2e48940f94acb0af582e5ef03537800f"
 
-DEFAULT_PREFERENCE = "1"
+SRC_URI = "file://libva-1.67.0.pre1.tar.bz2"
 
-SRC_URI = "git://github.com/01org/iotg-lin-gfx-libva.git;protocol=https;branch=release/mr3"
-
-SRCREV = "df0edf87b524ab664711f6086bfed3dfedc61efe"
+S = "${WORKDIR}/libva-1.67.0.pre1"
 
 DEPENDS = "libdrm virtual/mesa virtual/libgles1 virtual/libgles2 virtual/egl"
 
-inherit autotools pkgconfig
+inherit autotools pkgconfig distro_features_check
 
-S = "${WORKDIR}/git"
+REQUIRED_DISTRO_FEATURES = "opengl"
 
-EXTRA_OECONF = "--disable-dummy-driver"
-
-PACKAGECONFIG ??= "${@bb.utils.contains("DISTRO_FEATURES", "x11", "x11", "", d)} \
-                   ${@bb.utils.contains("DISTRO_FEATURES", "wayland", "wayland", "", d)}"
+PACKAGECONFIG ??= "${@bb.utils.filter('DISTRO_FEATURES', 'wayland x11', d)}"
 PACKAGECONFIG[x11] = "--enable-x11,--disable-x11,virtual/libx11 libxext libxfixes"
-PACKAGECONFIG[wayland] = "--enable-wayland,--disable-wayland,wayland"
+PACKAGECONFIG[wayland] = "--enable-wayland,--disable-wayland,wayland-native wayland"
 
 PACKAGES =+ "${PN}-x11 ${PN}-tpi ${PN}-glx ${PN}-egl ${PN}-wayland"
 

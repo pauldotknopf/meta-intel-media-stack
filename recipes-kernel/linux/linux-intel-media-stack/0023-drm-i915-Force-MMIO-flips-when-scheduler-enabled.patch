@@ -1,0 +1,44 @@
+From 2a389769fba6cddd349712562de66d358ca05792 Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Mon, 8 Sep 2014 14:31:24 +0100
+Subject: [PATCH 023/153] drm/i915: Force MMIO flips when scheduler enabled
+
+MMIO flips are the preferred mechanism now but more importantly, pipe
+based flips cause issues for the scheduler. Specifically, submitting
+work to the rings around the side of the scheduler could cause that
+work to be lost if the scheduler generates a pre-emption event on that
+ring.
+
+For: VIZ-1587
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+
+Conflicts:
+	drivers/gpu/drm/i915/intel_display.c
+---
+ drivers/gpu/drm/i915/intel_display.c |    3 +++
+ 1 files changed, 3 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 95d24e3..aec65d4 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -44,6 +44,7 @@
+ #include <drm/drm_plane_helper.h>
+ #include <drm/drm_rect.h>
+ #include <linux/dma_remapping.h>
++#include "i915_scheduler.h"
+ 
+ /* Primary plane formats for gen <= 3 */
+ static const uint32_t i8xx_primary_formats[] = {
+@@ -11174,6 +11175,8 @@ static bool use_mmio_flip(struct intel_engine_cs *ring,
+ 		return true;
+ 	else if (i915.enable_execlists)
+ 		return true;
++	else if (i915_scheduler_is_enabled(ring->dev))
++		return true;
+ 	else
+ 		return ring != i915_gem_request_get_ring(obj->last_write_req);
+ }
+-- 
+1.7.1
+

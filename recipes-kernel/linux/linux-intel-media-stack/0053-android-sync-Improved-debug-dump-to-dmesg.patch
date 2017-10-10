@@ -1,0 +1,166 @@
+From ed65ef67227f5061473baea974253db96802f615 Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Tue, 1 Dec 2015 12:27:29 +0000
+Subject: [PATCH 053/153] android/sync: Improved debug dump to dmesg
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The sync code has a facility for dumping current state information via
+debugfs. It also has a way to re-use the same code for dumping to the
+kernel log on an internal error. However, the redirection was rather
+clunky and split the output across multiple prints at arbitrary
+boundaries. This made it difficult to read and could result in output
+from different sources being randomly interspersed.
+
+This patch improves the redirection code to split the output on line
+feed boundaries instead. It also adds support for highlighting the
+offending fence object that caused the state dump in the first place.
+
+v0.4: New patch in series.
+
+v0.5: Twiddled white space and line wrapping to keep style checker
+happy.
+
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+Cc: Gustavo Padovan <gustavo.padovan@collabora.co.uk>
+Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Cc: Arve Hjønnevåg <arve@android.com>
+Cc: Riley Andrews <riandrews@android.com>
+Reviewed-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+---
+ drivers/android/sync.c       |    9 +++++-
+ drivers/android/sync.h       |    5 ++-
+ drivers/android/sync_debug.c |   51 +++++++++++++++++++++++++++++++----------
+ 3 files changed, 48 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/android/sync.c b/drivers/android/sync.c
+index 7f0e919..db4a54b 100644
+--- a/drivers/android/sync.c
++++ b/drivers/android/sync.c
+@@ -86,6 +86,11 @@ static void sync_timeline_put(struct sync_timeline *obj)
+ 
+ void sync_timeline_destroy(struct sync_timeline *obj)
+ {
++	if (!list_empty(&obj->active_list_head)) {
++		pr_info("destroying timeline with outstanding fences!\n");
++		sync_dump_timeline(obj);
++	}
++
+ 	obj->destroyed = true;
+ 	/*
+ 	 * Ensure timeline is marked as destroyed before
+@@ -397,7 +402,7 @@ int sync_fence_wait(struct sync_fence *fence, long timeout)
+ 		if (timeout) {
+ 			pr_info("fence timeout on [%p] after %dms\n", fence,
+ 				jiffies_to_msecs(timeout));
+-			sync_dump();
++			sync_dump(fence);
+ 		}
+ 		return -ETIME;
+ 	}
+@@ -405,7 +410,7 @@ int sync_fence_wait(struct sync_fence *fence, long timeout)
+ 	ret = atomic_read(&fence->status);
+ 	if (ret) {
+ 		pr_info("fence error %ld on [%p]\n", ret, fence);
+-		sync_dump();
++		sync_dump(fence);
+ 	}
+ 	return ret;
+ }
+diff --git a/drivers/android/sync.h b/drivers/android/sync.h
+index 4ccff01..d57fa0a 100644
+--- a/drivers/android/sync.h
++++ b/drivers/android/sync.h
+@@ -351,14 +351,15 @@ void sync_timeline_debug_add(struct sync_timeline *obj);
+ void sync_timeline_debug_remove(struct sync_timeline *obj);
+ void sync_fence_debug_add(struct sync_fence *fence);
+ void sync_fence_debug_remove(struct sync_fence *fence);
+-void sync_dump(void);
++void sync_dump(struct sync_fence *fence);
++void sync_dump_timeline(struct sync_timeline *timeline);
+ 
+ #else
+ # define sync_timeline_debug_add(obj)
+ # define sync_timeline_debug_remove(obj)
+ # define sync_fence_debug_add(fence)
+ # define sync_fence_debug_remove(fence)
+-# define sync_dump()
++# define sync_dump(fence)
+ #endif
+ int sync_fence_wake_up_wq(wait_queue_t *curr, unsigned mode,
+ 				 int wake_flags, void *key);
+diff --git a/drivers/android/sync_debug.c b/drivers/android/sync_debug.c
+index 02a1649..4a2f9f5 100644
+--- a/drivers/android/sync_debug.c
++++ b/drivers/android/sync_debug.c
+@@ -228,28 +228,53 @@ late_initcall(sync_debugfs_init);
+ 
+ #define DUMP_CHUNK 256
+ static char sync_dump_buf[64 * 1024];
+-void sync_dump(void)
++
++static void sync_dump_dfs(struct seq_file *s, void *targetPtr)
++{
++	char *start, *end;
++	char targetStr[100];
++
++	if (targetPtr)
++		snprintf(targetStr, sizeof(targetStr) - 1, "%p", targetPtr);
++
++	start = end = s->buf;
++	while ((end = strchr(end, '\n'))) {
++		*end = 0;
++		if (targetPtr && strstr(start, targetStr))
++			pr_info("*** %s ***\n", start);
++		else
++			pr_info("%s\n", start);
++		start = ++end;
++	}
++
++	if ((start - s->buf) < s->count)
++		pr_info("%d vs %d: >?>%s<?<\n", (uint32_t) (start - s->buf),
++			(uint32_t) s->count, start);
++}
++
++void sync_dump(struct sync_fence *targetPtr)
+ {
+ 	struct seq_file s = {
+ 		.buf = sync_dump_buf,
+ 		.size = sizeof(sync_dump_buf) - 1,
+ 	};
+-	int i;
+ 
+ 	sync_debugfs_show(&s, NULL);
+ 
+-	for (i = 0; i < s.count; i += DUMP_CHUNK) {
+-		if ((s.count - i) > DUMP_CHUNK) {
+-			char c = s.buf[i + DUMP_CHUNK];
++	sync_dump_dfs(&s, targetPtr);
++}
+ 
+-			s.buf[i + DUMP_CHUNK] = 0;
+-			pr_cont("%s", s.buf + i);
+-			s.buf[i + DUMP_CHUNK] = c;
+-		} else {
+-			s.buf[s.count] = 0;
+-			pr_cont("%s", s.buf + i);
+-		}
+-	}
++void sync_dump_timeline(struct sync_timeline *timeline)
++{
++	struct seq_file s = {
++		.buf = sync_dump_buf,
++		.size = sizeof(sync_dump_buf) - 1,
++	};
++
++	pr_info("timeline: %p\n", timeline);
++	sync_print_obj(&s, timeline);
++
++	sync_dump_dfs(&s, NULL);
+ }
+ 
+ #endif
+-- 
+1.7.1
+

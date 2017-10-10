@@ -1,0 +1,217 @@
+From a0e49355b864749bbdfd9daa4d91366a680a5e6c Mon Sep 17 00:00:00 2001
+From: Artur Harasimiuk <artur.harasimiuk@intel.com>
+Date: Fri, 8 Jan 2016 15:12:34 +0100
+Subject: [PATCH 091/153] [VPG] drm/i915: Exec flag to force non IA-Coherent cache for Gen9+
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Starting from Gen9 we can use IA-Coherent caches. Generally, coherency
+can be programmed using RENDER_SURFACE_STATE or BTI 255, depending if
+surface state model or stateless model is used. It is important to control
+whether IA or GPU cache coherency should be used, especially for non-LLC
+devices. However this control is complicated when stateless memory access
+model is in action. It would require dedicated ISA code depending on
+coherency requirement.
+
+By setting HDC_FORCE_NON_COHERENT we *Force* data port to ignore these
+attributes and all caches are GPU-Coherent. This register is part of HW
+context, however it is private and cannot be programmed from
+non-privileged batch buffer.
+
+Default operation mode is as programmed by workaround. When
+WaForceEnableNonCoherent is in place caches are GPU-Coherent and we
+should not change it back to IA-Coherent because this can lead to GPU
+hangs (as workaround description says).
+
+A new device parameter is to inform user space about kernel capability.
+It tells if can request to disable IA-Coherency.
+
+Exec flag is to allow UMD to decide whether IA-Coherency is not needed
+for submitted batch buffer. Exec flag behavior:
+    1. flag is not set - use system default
+    2. flag is set but WaForceEnableNonCoherent is
+       a) not programmed - *Force* GPU-Coherent cache by setting
+          HDC_FORCE_NON_COHERENT prior to bb_start and clearing after
+       b) programmed - do nothing, GPU-Coherent is already in place
+
+v2: Ringbufer handling fixes (Chris)
+    Moved workarounds to common place (Chris)
+    Removed flag cleanup (Dave)
+    Updated commit message to reflect comments (Chris,Dave)
+v3 (private): Move ABI exposed to userspace to avoid conflicts with upstream
+
+Change-Id: Ifee222bb6a0c08a97323b9fbb0529669309d2a66
+Signed-off-by: Artur Harasimiuk <artur.harasimiuk@intel.com>
+Signed-off-by: Michał Winiarski <michal.winiarski@intel.com>
+
+Conflicts:
+	drivers/gpu/drm/i915/intel_lrc.c
+	include/uapi/drm/i915_drm.h
+---
+ drivers/gpu/drm/i915/i915_dma.c            |    4 +++
+ drivers/gpu/drm/i915/i915_drv.h            |    4 +++
+ drivers/gpu/drm/i915/i915_gem_execbuffer.c |    4 +++
+ drivers/gpu/drm/i915/intel_lrc.c           |   37 ++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/intel_ringbuffer.c    |    2 +
+ include/uapi/drm/i915_drm.h                |   10 +++++++-
+ 6 files changed, 60 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
+index 01be9a7..79c3dc1 100644
+--- a/drivers/gpu/drm/i915/i915_dma.c
++++ b/drivers/gpu/drm/i915/i915_dma.c
+@@ -174,6 +174,10 @@ static int i915_getparam(struct drm_device *dev, void *data,
+ 	case I915_PARAM_HAS_EXEC_SOFTPIN:
+ 		value = 1;
+ 		break;
++	case I915_PRIVATE_PARAM_HAS_EXEC_FORCE_NON_COHERENT:
++		value = !dev_priv->workarounds.WaForceEnableNonCoherent &&
++			INTEL_INFO(dev)->gen >= 9;
++		break;
+ 	default:
+ 		DRM_DEBUG("Unknown parameter %d\n", param->param);
+ 		return -EINVAL;
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 877fdaf..5f9ae07 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -1727,6 +1727,10 @@ struct i915_wa_reg {
+ struct i915_workarounds {
+ 	struct i915_wa_reg reg[I915_MAX_WA_REGS];
+ 	u32 count;
++
++	struct {
++		unsigned int WaForceEnableNonCoherent:1;
++	};
+ };
+ 
+ struct i915_virtual_gpu {
+diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+index 904c329..57a4325 100644
+--- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+@@ -1496,6 +1496,10 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
+ 	if (!i915_gem_check_execbuffer(args))
+ 		return -EINVAL;
+ 
++	if ((args->flags & I915_PRIVATE_EXEC_FORCE_NON_COHERENT) &&
++		INTEL_INFO(dev)->gen < 9)
++		return -EINVAL;
++
+ 	ret = validate_exec_list(dev, exec, args->buffer_count);
+ 	if (ret)
+ 		return ret;
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index d8c58f7..34ed6b1 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -895,6 +895,35 @@ int intel_logical_ring_reserve_space(struct drm_i915_gem_request *request)
+ 	return intel_logical_ring_begin(request, 0);
+ }
+ 
++static inline int
++intel_lr_emit_force_non_coherent(struct i915_execbuffer_params *params,
++		bool force)
++{
++	struct drm_i915_private *dev_priv = params->dev->dev_private;
++	int ret;
++
++	if (dev_priv->workarounds.WaForceEnableNonCoherent)
++		return 0;
++
++	if (params->args_flags & I915_PRIVATE_EXEC_FORCE_NON_COHERENT) {
++		struct intel_ringbuffer *ringbuf = params->request->ringbuf;
++
++		ret = intel_logical_ring_begin(params->request, 4);
++		if (ret)
++			return ret;
++
++		intel_logical_ring_emit(ringbuf, MI_NOOP);
++		intel_logical_ring_emit(ringbuf, MI_LOAD_REGISTER_IMM(1));
++		intel_logical_ring_emit(ringbuf, HDC_CHICKEN0);
++		intel_logical_ring_emit(ringbuf, force ?
++				_MASKED_BIT_ENABLE(HDC_FORCE_NON_COHERENT) :
++				_MASKED_BIT_DISABLE(HDC_FORCE_NON_COHERENT));
++		intel_logical_ring_advance(ringbuf);
++	}
++
++	return 0;
++}
++
+ /**
+  * execlists_submission() - submit a batchbuffer for execution, Execlists style
+  * @dev: DRM device.
+@@ -1058,6 +1087,10 @@ int intel_execlists_submission_final(struct i915_execbuffer_params *params)
+ 		dev_priv->relative_constants_mode = params->instp_mode;
+ 	}
+ 
++	ret = intel_lr_emit_force_non_coherent(params, true);
++	if (ret)
++		return ret;
++
+ 	if ((IS_GEN8(dev) || IS_GEN9(dev)) && ring == &dev_priv->ring[RCS])
+ 		i915_program_perfmon(dev, req);
+ 
+@@ -1068,6 +1101,10 @@ int intel_execlists_submission_final(struct i915_execbuffer_params *params)
+ 	if (ret)
+ 		goto err;
+ 
++	ret = intel_lr_emit_force_non_coherent(params, false);
++	if (ret)
++		return ret;
++
+ 	trace_i915_gem_ring_dispatch(req, params->dispatch_flags);
+ 
+ 	i915_gem_execbuffer_retire_commands(params);
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.c b/drivers/gpu/drm/i915/intel_ringbuffer.c
+index 2552eee..782e4f9 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.c
+@@ -822,6 +822,7 @@ static int gen8_init_workarounds(struct intel_engine_cs *ring)
+ 	 * invalidation occurs during a PSD flush.
+ 	 */
+ 	/* WaForceEnableNonCoherent:bdw,chv */
++	dev_priv->workarounds.WaForceEnableNonCoherent = 1;
+ 	/* WaHdcDisableFetchWhenMasked:bdw,chv */
+ 	WA_SET_BIT_MASKED(HDC_CHICKEN0,
+ 			  HDC_DONOT_FETCH_MEM_WHEN_MASKED |
+@@ -1076,6 +1077,7 @@ static int skl_init_workarounds(struct intel_engine_cs *ring)
+ 		 * is a workaround for a possible hang in the unlikely event
+ 		 * a TLB invalidation occurs during a PSD flush.
+ 		 */
++		dev_priv->workarounds.WaForceEnableNonCoherent = 1;
+ 		/* WaForceEnableNonCoherent:skl */
+ 		WA_SET_BIT_MASKED(HDC_CHICKEN0,
+ 				  HDC_FORCE_NON_COHERENT);
+diff --git a/include/uapi/drm/i915_drm.h b/include/uapi/drm/i915_drm.h
+index fa9940f..208d18f 100644
+--- a/include/uapi/drm/i915_drm.h
++++ b/include/uapi/drm/i915_drm.h
+@@ -362,6 +362,8 @@ typedef struct drm_i915_irq_wait {
+ #define I915_PARAM_HAS_RESOURCE_STREAMER 36
+ #define I915_PARAM_HAS_EXEC_SOFTPIN	 37
+ 
++#define I915_PRIVATE_PARAM_HAS_EXEC_FORCE_NON_COHERENT (-1)
++
+ typedef struct drm_i915_getparam {
+ 	__s32 param;
+ 	/*
+@@ -796,7 +798,13 @@ struct drm_i915_gem_execbuffer2 {
+  */
+ #define I915_EXEC_CREATE_FENCE		(1<<17)
+ 
+-#define __I915_EXEC_UNKNOWN_FLAGS -(I915_EXEC_CREATE_FENCE<<1)
++#define __I915_EXEC_UNKNOWN_FLAGS (-(I915_EXEC_CREATE_FENCE<<1) & \
++				   ~I915_PRIVATE_EXEC_FORCE_NON_COHERENT)
++
++/**
++ * Tell the kernel that the batch buffer requires to disable IA-Coherency
++ */
++#define I915_PRIVATE_EXEC_FORCE_NON_COHERENT    (1<<31)
+ 
+ #define I915_EXEC_CONTEXT_ID_MASK	(0xffffffff)
+ #define i915_execbuffer2_set_context_id(eb2, context) \
+-- 
+1.7.1
+

@@ -1,0 +1,176 @@
+From 7fab46e41f6825c4404e239973aa1a9ff952a7e3 Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Thu, 5 May 2016 00:36:08 -0400
+Subject: [PATCH 123/153] [VPG]: drm/i915: flush the request during wait_rendering
+
+Flush the offending request out to the hardware, then allow
+the wait_request call to actually sleep on it rather than returning EGAIN.
+
+https://vthsd.fm.intel.com/hsd/pcgsw/default.aspx#bug/default.aspx?bug_id=10045755
+https://vthsd.fm.intel.com/hsd/pcgsw/default.aspx#bug/default.aspx?bug_id=10045895
+---
+ drivers/gpu/drm/i915/i915_gem.c       |   12 ++++++
+ drivers/gpu/drm/i915/i915_scheduler.c |   67 +++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/i915_scheduler.h |    2 +
+ drivers/gpu/drm/i915/intel_lrc.c      |   13 ++++++-
+ 4 files changed, 93 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 31f3e6f..8d18adf 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1616,6 +1616,12 @@ i915_gem_object_wait_rendering(struct drm_i915_gem_object *obj,
+ 
+ 	if (readonly) {
+ 		if (obj->last_write_req != NULL) {
++			/* Mutex is held so can only really wait if the request
++			 * has already been submitted. But is it safe to submit??? */
++			ret = i915_scheduler_flush_request(obj->last_write_req, true);
++			if (ret < 0)
++				return ret;
++
+ 			ret = i915_wait_request(obj->last_write_req);
+ 			if (ret)
+ 				return ret;
+@@ -1631,6 +1637,12 @@ i915_gem_object_wait_rendering(struct drm_i915_gem_object *obj,
+ 			if (obj->last_read_req[i] == NULL)
+ 				continue;
+ 
++			/* Mutex is held so can only really wait if the request
++			 * has already been submitted. But is it safe to submit??? */
++			ret = i915_scheduler_flush_request(obj->last_read_req[i], true);
++			if (ret < 0)
++				return ret;
++
+ 			ret = i915_wait_request(obj->last_read_req[i]);
+ 			if (ret)
+ 				return ret;
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.c b/drivers/gpu/drm/i915/i915_scheduler.c
+index 4670a27..678cf83 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.c
++++ b/drivers/gpu/drm/i915/i915_scheduler.c
+@@ -1633,6 +1633,73 @@ static int i915_scheduler_submit_max_priority(struct intel_engine_cs *ring,
+ }
+ 
+ /**
++ * i915_scheduler_flush_request - force a given request through the scheduler.
++ * @req: Request to be flushed
++ * @is_locked: Is the driver mutex lock held?
++ * For various reasons it is sometimes necessary to flush a request from the
++ * scheduler's queue and through the hardware immediately rather than at some
++ * vague time in the future.
++ * Returns zero on success or -EAGAIN if the scheduler is busy (e.g. waiting
++ * for a pre-emption event to complete) but the mutex lock is held which
++ * would prevent the scheduler's asynchronous processing from completing.
++ */
++int i915_scheduler_flush_request(struct drm_i915_gem_request *req,
++				 bool is_locked)
++{
++	struct drm_i915_private *dev_priv;
++	struct i915_scheduler *scheduler;
++	unsigned long flags;
++	int flush_count;
++	uint32_t engine_id;
++
++	if (!req)
++		return -EINVAL;
++
++	dev_priv  = to_i915(req->ring->dev);
++	scheduler = dev_priv->scheduler;
++
++	if (!scheduler)
++		return 0;
++
++	if (!req->scheduler_qe)
++		return 0;
++
++	if (!I915_SQS_IS_QUEUED(req->scheduler_qe))
++		return 0;
++
++	engine_id = req->ring->id;
++	if (is_locked && (scheduler->flags[engine_id] & I915_SF_SUBMITTING)) {
++		/* Scheduler is busy already submitting another batch,
++		 * come back later rather than going recursive... */
++		return -EAGAIN;
++	}
++
++	if (list_empty(&scheduler->node_queue[engine_id]))
++		return 0;
++
++	spin_lock_irqsave(&scheduler->lock, flags);
++
++	scheduler->stats[engine_id].flush_req++;
++
++	i915_scheduler_priority_bump_clear(scheduler);
++
++	flush_count = i915_scheduler_priority_bump(scheduler,
++			    req->scheduler_qe, scheduler->priority_level_max);
++	scheduler->stats[engine_id].flush_bump += flush_count;
++
++	spin_unlock_irqrestore(&scheduler->lock, flags);
++
++	if (flush_count) {
++		DRM_DEBUG_DRIVER("<%s> Bumped %d entries\n", req->ring->name, flush_count);
++		flush_count = i915_scheduler_submit_max_priority(req->ring, is_locked);
++		if (flush_count > 0)
++			scheduler->stats[engine_id].flush_submit += flush_count;
++	}
++
++	return flush_count;
++}
++
++/**
+  * i915_scheduler_flush_stamp - force requests of a given age through the
+  * scheduler.
+  * @ring: Ring to be flushed
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.h b/drivers/gpu/drm/i915/i915_scheduler.h
+index dbd4407..bcd3f94 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.h
++++ b/drivers/gpu/drm/i915/i915_scheduler.h
+@@ -171,6 +171,8 @@ void i915_scheduler_work_handler(struct work_struct *work);
+ int i915_scheduler_flush(struct intel_engine_cs *ring, bool is_locked);
+ int i915_scheduler_flush_stamp(struct intel_engine_cs *ring,
+ 			       unsigned long stamp, bool is_locked);
++int i915_scheduler_flush_request(struct drm_i915_gem_request *req,
++				 bool is_locked);
+ int i915_scheduler_dump(struct intel_engine_cs *ring,
+ 			const char *msg);
+ int i915_scheduler_dump_all(struct drm_device *dev, const char *msg);
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 4632f8b..f1f95db 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -2642,6 +2642,7 @@ int intel_lr_context_deferred_alloc(struct intel_context *ctx,
+ 				     struct intel_engine_cs *ring)
+ {
+ 	struct drm_device *dev = ring->dev;
++	struct drm_i915_private *dev_priv = dev->dev_private;
+ 	struct drm_i915_gem_object *ctx_obj;
+ 	uint32_t context_size;
+ 	struct intel_ringbuffer *ringbuf;
+@@ -2690,11 +2691,21 @@ int intel_lr_context_deferred_alloc(struct intel_context *ctx,
+ 		ret = i915_gem_request_alloc(ring,
+ 			ctx, &req);
+ 		if (ret) {
+-			DRM_ERROR("ring create req: %d\n",
++			DRM_INFO("ring create req: %d\n",
+ 				ret);
+ 			goto error_ringbuf;
+ 		}
+ 
++		if (req->reserved_seqno != dev_priv->last_seqno) {
++			ret = i915_gem_get_seqno(ring->dev, &req->reserved_seqno);
++			if (ret) {
++				DRM_ERROR("ring get seqno: %d\n",
++					ret);
++				i915_gem_request_cancel(req);
++				goto error_ringbuf;
++			}
++		}
++
+ 		ret = ring->init_context(req);
+ 		if (ret) {
+ 			DRM_ERROR("ring init context: %d\n",
+-- 
+1.7.1
+

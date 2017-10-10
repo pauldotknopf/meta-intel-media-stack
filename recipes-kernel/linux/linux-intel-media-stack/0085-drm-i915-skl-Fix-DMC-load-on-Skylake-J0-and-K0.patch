@@ -1,0 +1,36 @@
+From 9e4589e9c49bf20981c5303b30bd124c97a97f4e Mon Sep 17 00:00:00 2001
+From: Mat Martineau <mathew.j.martineau@linux.intel.com>
+Date: Thu, 28 Jan 2016 15:19:23 -0800
+Subject: [PATCH 085/153] drm/i915/skl: Fix DMC load on Skylake J0 and K0
+
+The driver does not load firmware for unknown steppings, so these new
+steppings must be added to the list.
+
+Cc: Rodrigo Vivi <rodrigo.vivi@intel.com>
+Signed-off-by: Mat Martineau <mathew.j.martineau@linux.intel.com>
+Reviewed-by: Rodrigo Vivi <rodrigo.vivi@intel.com>
+---
+ drivers/gpu/drm/i915/intel_csr.c |    7 ++++---
+ 1 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_csr.c b/drivers/gpu/drm/i915/intel_csr.c
+index 9e530a7..7d7f31b 100644
+--- a/drivers/gpu/drm/i915/intel_csr.c
++++ b/drivers/gpu/drm/i915/intel_csr.c
+@@ -178,9 +178,10 @@ struct stepping_info {
+ };
+ 
+ static const struct stepping_info skl_stepping_info[] = {
+-		{'A', '0'}, {'B', '0'}, {'C', '0'},
+-		{'D', '0'}, {'E', '0'}, {'F', '0'},
+-		{'G', '0'}, {'H', '0'}, {'I', '0'}
++	{'A', '0'}, {'B', '0'}, {'C', '0'},
++	{'D', '0'}, {'E', '0'}, {'F', '0'},
++	{'G', '0'}, {'H', '0'}, {'I', '0'},
++	{'J', '0'}, {'K', '0'}
+ };
+ 
+ static struct stepping_info bxt_stepping_info[] = {
+-- 
+1.7.1
+

@@ -1,0 +1,86 @@
+From 3c84caccb3380dde66ed7565b3299eabcc41d0b3 Mon Sep 17 00:00:00 2001
+From: xsang <oliver.sang@intel.com>
+Date: Thu, 3 Mar 2016 12:43:28 +0800
+Subject: [PATCH 106/153] drm/i915: add MOCS tables for SKL GT3e and GT4e for CL534416
+
+Only consider SKL GT3e and GT4e in this update since they are linux
+xcode project PORs. Previous MOCS table is for GT2. Fallback any
+other not linux xcode POR SKL sku to use GT2 MOCS.
+---
+ drivers/gpu/drm/i915/intel_mocs_gmm_table.c |   46 +++++++++++++++++++++++++++
+ 1 files changed, 46 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_mocs_gmm_table.c b/drivers/gpu/drm/i915/intel_mocs_gmm_table.c
+index c7604db..fc5b05f 100644
+--- a/drivers/gpu/drm/i915/intel_mocs_gmm_table.c
++++ b/drivers/gpu/drm/i915/intel_mocs_gmm_table.c
+@@ -40,6 +40,40 @@ static const struct drm_i915_mocs_entry gen_9_mocs_table[] = {
+ 	{0x00000019, 0x0010}, /* ED_UC LLC/eLLC LRU_S EDSCC:0 L3SCC:0 L3_UC */
+ };
+ 
++static const struct drm_i915_mocs_entry gen_9_GT3e_mocs_table[] = {
++	{0x00000009, 0x0010}, /* ED_UC LLC/eLLC EDSCC:0 L3SCC:0 L3_UC */
++	{0x00000038, 0x0030}, /* ED_PTE LLC/eLLC LRU_L EDSCC:0 L3SCC:0 L3_WB */
++	{0x0000003b, 0x0030}, /* ED_WB LLC/eLLC LRU_L EDSCC:0 L3SCC:0 L3_WB */
++	{0x00000033, 0x0030},
++	{0x00000033, 0x0010},
++	{0x00000039, 0x0010},
++	{0x00000013, 0x0010},
++	{0x0000003b, 0x0010},
++	{0x00000039, 0x0030},
++	{0x00000037, 0x0030},
++	{0x00000037, 0x0010},
++	{0x0000001b, 0x0030},
++	{0x00000003, 0x0010},
++	{0x0000001b, 0x0010},
++};
++
++static const struct drm_i915_mocs_entry gen_9_GT4e_mocs_table[] = {
++	{0x00000009, 0x0010}, /* ED_UC LLC/eLLC EDSCC:0 L3SCC:0 L3_UC */
++	{0x00000038, 0x0030}, /* ED_PTE LLC/eLLC LRU_L EDSCC:0 L3SCC:0 L3_WB */
++	{0x0000003b, 0x0030}, /* ED_WB LLC/eLLC LRU_L EDSCC:0 L3SCC:0 L3_WB */
++	{0x00000033, 0x0030},
++	{0x0000003b, 0x0010},
++	{0x00000039, 0x0010},
++	{0x00000033, 0x0010},
++	{0x0000001b, 0x0010},
++	{0x00000039, 0x0030},
++	{0x00000037, 0x0030},
++	{0x00000037, 0x0010},
++	{0x0000001b, 0x0030},
++	{0x00000003, 0x0010},
++	{0x00000013, 0x0010},
++};
++
+ static const struct drm_i915_mocs_entry broxton_mocs_table[] = {
+ 	{0x00000009, 0x0010}, /* ED_UC LLC/eLLC EDSCC:0 L3SCC:0 L3_UC */
+ 	{0x00000038, 0x0030}, /* ED_PTE LLC/eLLC LRU_L EDSCC:0 L3SCC:0 L3_WB */
+@@ -60,13 +94,25 @@ static const struct drm_i915_mocs_entry broxton_mocs_table[] = {
+ bool get_mocs_settings(struct drm_device *dev,
+ 			struct drm_i915_mocs_table *table) {
+ 	bool	result = false;
++	struct	drm_i915_private *dev_priv = dev->dev_private;
+ 
+ 	if (INTEL_INFO(dev)->gen == 9) {
+ 		if (IS_BROXTON(dev)) {
+ 			table->size = ARRAY_SIZE(broxton_mocs_table);
+ 			table->table = broxton_mocs_table;
+ 			result = true;
++		} else if (IS_SKL_GT3(dev) && dev_priv->ellc_size) {
++			/* GT3e */
++			table->size = ARRAY_SIZE(gen_9_GT3e_mocs_table);
++			table->table = gen_9_GT3e_mocs_table;
++			result = true;
++		} else if (IS_SKL_GT4(dev) && dev_priv->ellc_size) {
++			table->size = ARRAY_SIZE(gen_9_GT4e_mocs_table);
++			table->table = gen_9_GT4e_mocs_table;
++			result = true;
+ 		} else {
++			/* fall back all other not Linux xcode POR cases
++			 * to use GT2 mocs table */
+ 			table->size = ARRAY_SIZE(gen_9_mocs_table);
+ 			table->table = gen_9_mocs_table;
+ 			result = true;
+-- 
+1.7.1
+

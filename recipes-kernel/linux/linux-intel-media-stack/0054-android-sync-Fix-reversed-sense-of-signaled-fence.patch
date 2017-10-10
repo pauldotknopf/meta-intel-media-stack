@@ -1,0 +1,63 @@
+From 635b4a0dc1a2e710f5260f44f413706553c677dd Mon Sep 17 00:00:00 2001
+From: Peter Lawthers <peter.lawthers@intel.com>
+Date: Thu, 27 Aug 2015 12:05:12 +0100
+Subject: [PATCH 054/153] android/sync: Fix reversed sense of signaled fence
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+In the 3.14 kernel, a signaled fence was indicated by the status field
+== 1. In 4.x, a status == 0 indicates signaled, status < 0 indicates error,
+and status > 0 indicates active.
+
+This patch wraps the check for a signaled fence in a function so that
+callers no longer needs to know the underlying implementation.
+
+v0.3: New patch for series.
+
+Change-Id: I8e565e49683e3efeb9474656cd84cf4add6ad6a2
+Tracked-On: https://jira01.devtools.intel.com/browse/ACD-308
+Cc: Gustavo Padovan <gustavo.padovan@collabora.co.uk>
+Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Cc: Arve Hjønnevåg <arve@android.com>
+Cc: Riley Andrews <riandrews@android.com>
+Signed-off-by: Peter Lawthers <peter.lawthers@intel.com>
+---
+ drivers/android/sync.h |   21 +++++++++++++++++++++
+ 1 files changed, 21 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/android/sync.h b/drivers/android/sync.h
+index d57fa0a..75532d8 100644
+--- a/drivers/android/sync.h
++++ b/drivers/android/sync.h
+@@ -345,6 +345,27 @@ int sync_fence_cancel_async(struct sync_fence *fence,
+  */
+ int sync_fence_wait(struct sync_fence *fence, long timeout);
+ 
++/**
++ * sync_fence_is_signaled() - Return an indication if the fence is signaled
++ * @fence:	fence to check
++ *
++ * returns 1 if fence is signaled
++ * returns 0 if fence is not signaled
++ * returns < 0 if fence is in error state
++ */
++static inline int
++sync_fence_is_signaled(struct sync_fence *fence)
++{
++	int status;
++
++	status = atomic_read(&fence->status);
++	if (status == 0)
++		return 1;
++	if (status > 0)
++		return 0;
++	return status;
++}
++
+ #ifdef CONFIG_DEBUG_FS
+ 
+ void sync_timeline_debug_add(struct sync_timeline *obj);
+-- 
+1.7.1
+

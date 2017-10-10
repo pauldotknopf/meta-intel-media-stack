@@ -1,0 +1,210 @@
+From dff3ff74b75589e7e7a59ddfbde13b7ec7f25468 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Micha=C5=82=20Winiarski?= <michal.winiarski@intel.com>
+Date: Fri, 15 Apr 2016 14:14:02 +0200
+Subject: [PATCH 115/153] [VPG]: drm/i915: Add support for OCL Turbo Boost
+
+For some OpenCL workloads, the PM interrupts that drive RPS to increase
+GPU frequency are not generated, resulting in workload executing at
+low frequency.
+
+Let's implement a new private context param, controling whether the GPU
+frequency should be increased to max softlimit on request submission.
+After the initial GPU frequency increase, we're making sure that
+subsequent PM interrupts driving the frequency down are ignored by the
+RPS for the period of 2000ms after request submission.
+
+Change-Id: Ic357db2801e13fc78e3f166cf9f81a298ea60c03
+Cc: Zhipeng Gong <zhipeng.gong@intel.com>
+Cc: John Harrison <John.C.Harrison@Intel.com>
+---
+ drivers/gpu/drm/i915/i915_drv.h         |    8 ++++++
+ drivers/gpu/drm/i915/i915_gem_context.c |   41 +++++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/i915_irq.c         |    2 +-
+ drivers/gpu/drm/i915/i915_scheduler.c   |    4 +++
+ drivers/gpu/drm/i915/intel_pm.c         |   16 ++++++++++++
+ include/uapi/drm/i915_drm.h             |    1 +
+ 6 files changed, 71 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 230c142..c347304 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -883,6 +883,7 @@ struct i915_fence_timeline {
+ #define DEFAULT_CONTEXT_HANDLE 0
+ 
+ #define CONTEXT_NO_ZEROMAP (1<<0)
++#define CONTEXT_BOOST_FREQ (1<<31)
+ /**
+  * struct intel_context - as the name implies, represents a context.
+  * @ref: reference count.
+@@ -1211,6 +1212,13 @@ struct intel_gen6_power_mgmt {
+ 	 * talking to hw - so only take it when talking to hw!
+ 	 */
+ 	struct mutex hw_lock;
++
++#define DRM_I915_BOOST_TIMEOUT 2000
++#define DRM_I915_BOOST_TIMEOUT_JIFFIES msecs_to_jiffies(DRM_I915_BOOST_TIMEOUT)
++	struct timer_list boost_timeout;
++
++	atomic_t use_boost_freq;
++	atomic_t boost_ctx_count;
+ };
+ 
+ /* defined intel_pm.c */
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 4bde468..f9c104b 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -148,6 +148,22 @@ static void i915_gem_context_clean(struct intel_context *ctx)
+ 	}
+ }
+ 
++static inline void i915_gem_context_boost_inc(struct intel_context *ctx)
++{
++	struct intel_gen6_power_mgmt *rps = &ctx->i915->rps;
++	atomic_inc(&rps->boost_ctx_count);
++}
++
++static inline void i915_gem_context_boost_dec(struct intel_context *ctx)
++{
++	struct intel_gen6_power_mgmt *rps = &ctx->i915->rps;
++	WARN_ON(!atomic_read(&rps->boost_ctx_count));
++	if (atomic_dec_and_test(&rps->boost_ctx_count))
++		if (del_timer(&rps->boost_timeout))
++			atomic_set(&rps->use_boost_freq, 0);
++
++}
++
+ void i915_gem_context_free(struct kref *ctx_ref)
+ {
+ 	struct intel_context *ctx = container_of(ctx_ref, typeof(*ctx), ref);
+@@ -171,6 +187,8 @@ void i915_gem_context_free(struct kref *ctx_ref)
+ 
+ 	put_pid(ctx->pid);
+ 	i915_perfmon_ctx_cleanup(ctx);
++	if (ctx->flags & CONTEXT_BOOST_FREQ)
++		i915_gem_context_boost_dec(ctx);
+ 
+ 	list_del(&ctx->link);
+ 	kfree(ctx);
+@@ -951,6 +969,9 @@ int i915_gem_context_getparam_ioctl(struct drm_device *dev, void *data,
+ 	case I915_CONTEXT_PARAM_PRIORITY:
+ 		args->value = (__u64) ctx->sched_info.priority;
+ 		break;
++	case I915_CONTEXT_PRIVATE_PARAM_BOOST:
++		args->value = ctx->flags & CONTEXT_BOOST_FREQ;
++		break;
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+@@ -1017,6 +1038,26 @@ int i915_gem_context_setparam_ioctl(struct drm_device *dev, void *data,
+ 		break;
+ 	}
+ 
++	case I915_CONTEXT_PRIVATE_PARAM_BOOST:
++	{
++		int val = !!args->value;
++		if (args->size)
++			ret = -EINVAL;
++		else {
++			if (val != (ctx->flags & CONTEXT_BOOST_FREQ)) {
++				if (val) {
++					ctx->flags |= CONTEXT_BOOST_FREQ;
++					i915_gem_context_boost_inc(ctx);
++				}
++				else {
++					ctx->flags &= ~CONTEXT_NO_ZEROMAP;
++					i915_gem_context_boost_dec(ctx);
++				}
++			}
++		}
++		break;
++	}
++
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 592e5c1..4ec7cea 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -1106,7 +1106,7 @@ static void gen6_pm_rps_work(struct work_struct *work)
+ 	min = dev_priv->rps.min_freq_softlimit;
+ 	max = dev_priv->rps.max_freq_softlimit;
+ 
+-	if (client_boost) {
++	if (client_boost || atomic_read(&dev_priv->rps.use_boost_freq)) {
+ 		new_delay = dev_priv->rps.max_freq_softlimit;
+ 		adj = 0;
+ 	} else if (pm_iir & GEN6_PM_RP_UP_THRESHOLD) {
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.c b/drivers/gpu/drm/i915/i915_scheduler.c
+index e67d76b..ea831fa 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.c
++++ b/drivers/gpu/drm/i915/i915_scheduler.c
+@@ -627,6 +627,8 @@ static int i915_scheduler_submit(struct intel_engine_cs *ring)
+ 
+ 		spin_unlock_irq(&scheduler->lock);
+ 		ret = dev_priv->gt.execbuf_final(&node->params);
++		if (!ret && (node->params.ctx->flags & CONTEXT_BOOST_FREQ))
++			intel_queue_rps_boost_for_request(dev, node->params.request);
+ 		spin_lock_irq(&scheduler->lock);
+ 
+ 		/*
+@@ -834,6 +836,8 @@ static int i915_scheduler_queue_execbuffer_bypass(struct i915_scheduler_queue_en
+ 
+ 	scheduler->flags[qe->params.ring->id] |= I915_SF_SUBMITTING;
+ 	ret = dev_priv->gt.execbuf_final(&qe->params);
++	if (!ret && (qe->params.ctx->flags & CONTEXT_BOOST_FREQ))
++		intel_queue_rps_boost_for_request(dev_priv->dev, qe->params.request);
+ 	scheduler->stats[qe->params.ring->id].submitted++;
+ 	scheduler->flags[qe->params.ring->id] &= ~I915_SF_SUBMITTING;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 02bc122..c51fc44 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -7319,6 +7319,18 @@ void intel_queue_rps_boost_for_request(struct drm_device *dev,
+ 
+ 	INIT_WORK(&boost->work, __intel_rps_boost_work);
+ 	queue_work(to_i915(dev)->wq, &boost->work);
++
++	if (req->ctx->flags & CONTEXT_BOOST_FREQ) {
++		atomic_set(&to_i915(dev)->rps.use_boost_freq, 1);
++		mod_timer(&to_i915(dev)->rps.boost_timeout,
++			  req->emitted_jiffies + DRM_I915_BOOST_TIMEOUT_JIFFIES);
++	}
++}
++
++static void intel_boost_timeout_handler(unsigned long data)
++{
++	atomic_t *use_boost_freq = (atomic_t *)data;
++	atomic_set(use_boost_freq, 0);
+ }
+ 
+ void intel_pm_setup(struct drm_device *dev)
+@@ -7333,6 +7345,10 @@ void intel_pm_setup(struct drm_device *dev)
+ 	INIT_LIST_HEAD(&dev_priv->rps.clients);
+ 	INIT_LIST_HEAD(&dev_priv->rps.semaphores.link);
+ 	INIT_LIST_HEAD(&dev_priv->rps.mmioflips.link);
++	atomic_set(&dev_priv->rps.use_boost_freq, 0);
++	atomic_set(&dev_priv->rps.boost_ctx_count, 0);
++	setup_timer(&dev_priv->rps.boost_timeout, intel_boost_timeout_handler,
++			(unsigned long)&dev_priv->rps.use_boost_freq);
+ 
+ 	dev_priv->pm.suspended = false;
+ }
+diff --git a/include/uapi/drm/i915_drm.h b/include/uapi/drm/i915_drm.h
+index b1fb241..fc57651 100644
+--- a/include/uapi/drm/i915_drm.h
++++ b/include/uapi/drm/i915_drm.h
+@@ -1157,6 +1157,7 @@ struct drm_i915_gem_context_param {
+ #define I915_CONTEXT_PARAM_BAN_PERIOD 0x1
+ #define I915_CONTEXT_PARAM_NO_ZEROMAP 0x2
+ #define I915_CONTEXT_PARAM_PRIORITY	0x4
++#define I915_CONTEXT_PRIVATE_PARAM_BOOST 0x80000000
+ 	__u64 value;
+ };
+ 
+-- 
+1.7.1
+

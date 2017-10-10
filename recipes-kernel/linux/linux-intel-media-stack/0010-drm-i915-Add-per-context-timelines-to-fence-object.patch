@@ -1,0 +1,298 @@
+From 750915211b84e1c36764aab8dee936eb2d1b788c Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Mon, 13 Jul 2015 17:25:22 +0100
+Subject: [PATCH 010/153] drm/i915: Add per context timelines to fence object
+
+The fence object used inside the request structure requires a sequence
+number. Although this is not used by the i915 driver itself, it could
+potentially be used by non-i915 code if the fence is passed outside of
+the driver. This is the intention as it allows external kernel drivers
+and user applications to wait on batch buffer completion
+asynchronously via the dma-buff fence API.
+
+To ensure that such external users are not confused by strange things
+happening with the seqno, this patch adds in a per context timeline
+that can provide a guaranteed in-order seqno value for the fence. This
+is safe because the scheduler will not re-order batch buffers within a
+context - they are considered to be mutually dependent.
+
+v2: New patch in series.
+
+v3: Renamed/retyped timeline structure fields after review comments by
+Tvrtko Ursulin.
+
+Added context information to the timeline's name string for better
+identification in debugfs output.
+
+v5: Line wrapping and other white space fixes to keep style checker
+happy.
+
+For: VIZ-5190
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+
+Conflicts:
+	drivers/gpu/drm/i915/i915_drv.h
+---
+ drivers/gpu/drm/i915/i915_drv.h         |   25 +++++++---
+ drivers/gpu/drm/i915/i915_gem.c         |   83 +++++++++++++++++++++++++++---
+ drivers/gpu/drm/i915/i915_gem_context.c |   16 ++++++-
+ drivers/gpu/drm/i915/intel_lrc.c        |    8 +++
+ drivers/gpu/drm/i915/intel_ringbuffer.h |    1 -
+ 5 files changed, 115 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 5cda57a..dd6ae38 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -846,6 +846,15 @@ struct i915_ctx_hang_stats {
+ 	bool banned;
+ };
+ 
++struct i915_fence_timeline {
++	char        name[32];
++	unsigned    fence_context;
++	unsigned    next;
++
++	struct intel_context *ctx;
++	struct intel_engine_cs *ring;
++};
++
+ /* This must match up with the value previously used for execbuf2.rsvd1. */
+ #define DEFAULT_CONTEXT_HANDLE 0
+ 
+@@ -892,6 +901,7 @@ struct intel_context {
+ 		int pin_count;
+ 		struct i915_vma *lrc_vma;
+ 		u64 lrc_desc;
++		struct i915_fence_timeline fence_timeline;
+ 	} engine[I915_NUM_RINGS];
+ 
+ 	struct list_head link;
+@@ -2192,13 +2202,10 @@ void i915_gem_track_fb(struct drm_i915_gem_object *old,
+ struct drm_i915_gem_request {
+ 	/**
+ 	 * Underlying object for implementing the signal/wait stuff.
+-	 * NB: Never call fence_later() or return this fence object to user
+-	 * land! Due to lazy allocation, scheduler re-ordering, pre-emption,
+-	 * etc., there is no guarantee at all about the validity or
+-	 * sequentiality of the fence's seqno! It is also unsafe to let
+-	 * anything outside of the i915 driver get hold of the fence object
+-	 * as the clean up when decrementing the reference count requires
+-	 * holding the driver mutex lock.
++	 * NB: Never return this fence object to user land! It is unsafe to
++	 * let anything outside of the i915 driver get hold of the fence
++	 * object as the clean up when decrementing the reference count
++	 * requires holding the driver mutex lock.
+ 	 */
+ 	struct fence fence;
+ 
+@@ -2287,6 +2294,10 @@ int i915_gem_request_alloc(struct intel_engine_cs *ring,
+ 			   struct drm_i915_gem_request **req_out);
+ void i915_gem_request_cancel(struct drm_i915_gem_request *req);
+ 
++int i915_create_fence_timeline(struct drm_device *dev,
++			       struct intel_context *ctx,
++			       struct intel_engine_cs *ring);
++
+ static inline bool i915_gem_request_completed(struct drm_i915_gem_request *req)
+ {
+ 	return fence_is_signaled(&req->fence);
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index dfdb07e..44668fa 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2721,9 +2721,35 @@ static const char *i915_gem_request_get_driver_name(struct fence *req_fence)
+ 
+ static const char *i915_gem_request_get_timeline_name(struct fence *req_fence)
+ {
+-	struct drm_i915_gem_request *req = container_of(req_fence,
+-						 typeof(*req), fence);
+-	return req->ring->name;
++	struct drm_i915_gem_request *req;
++	struct i915_fence_timeline *timeline;
++
++	req = container_of(req_fence, typeof(*req), fence);
++	timeline = &req->ctx->engine[req->ring->id].fence_timeline;
++
++	return timeline->name;
++}
++
++static void i915_gem_request_timeline_value_str(struct fence *req_fence,
++						char *str, int size)
++{
++	struct drm_i915_gem_request *req;
++
++	req = container_of(req_fence, typeof(*req), fence);
++
++	/* Last signalled timeline value ??? */
++	snprintf(str, size, "? [%d]"/*, timeline->value*/,
++		 req->ring->get_seqno(req->ring, true));
++}
++
++static void i915_gem_request_fence_value_str(struct fence *req_fence,
++					     char *str, int size)
++{
++	struct drm_i915_gem_request *req;
++
++	req = container_of(req_fence, typeof(*req), fence);
++
++	snprintf(str, size, "%d [%d]", req->fence.seqno, req->seqno);
+ }
+ 
+ static const struct fence_ops i915_gem_request_fops = {
+@@ -2733,8 +2759,50 @@ static const struct fence_ops i915_gem_request_fops = {
+ 	.release		= i915_gem_request_free,
+ 	.get_driver_name	= i915_gem_request_get_driver_name,
+ 	.get_timeline_name	= i915_gem_request_get_timeline_name,
++	.fence_value_str	= i915_gem_request_fence_value_str,
++	.timeline_value_str	= i915_gem_request_timeline_value_str,
+ };
+ 
++int i915_create_fence_timeline(struct drm_device *dev,
++			       struct intel_context *ctx,
++			       struct intel_engine_cs *ring)
++{
++	struct i915_fence_timeline *timeline;
++
++	timeline = &ctx->engine[ring->id].fence_timeline;
++
++	if (timeline->ring)
++		return 0;
++
++	timeline->fence_context = fence_context_alloc(1);
++
++	/*
++	 * Start the timeline from seqno 0 as this is a special value
++	 * that is reserved for invalid sync points.
++	 */
++	timeline->next       = 1;
++	timeline->ctx        = ctx;
++	timeline->ring       = ring;
++
++	snprintf(timeline->name, sizeof(timeline->name), "%d>%s:%d",
++		 timeline->fence_context, ring->name, ctx->user_handle);
++
++	return 0;
++}
++
++static unsigned i915_fence_timeline_get_next_seqno(struct i915_fence_timeline *timeline)
++{
++	unsigned seqno;
++
++	seqno = timeline->next;
++
++	/* Reserve zero for invalid */
++	if (++timeline->next == 0)
++		timeline->next = 1;
++
++	return seqno;
++}
++
+ int i915_gem_request_alloc(struct intel_engine_cs *ring,
+ 			   struct intel_context *ctx,
+ 			   struct drm_i915_gem_request **req_out)
+@@ -2771,7 +2839,8 @@ int i915_gem_request_alloc(struct intel_engine_cs *ring,
+ 	}
+ 
+ 	fence_init(&req->fence, &i915_gem_request_fops, &ring->fence_lock,
+-		   ring->fence_context, req->seqno);
++		   ctx->engine[ring->id].fence_timeline.fence_context,
++		   i915_fence_timeline_get_next_seqno(&ctx->engine[ring->id].fence_timeline));
+ 
+ 	/*
+ 	 * Reserve space in the ring buffer for all the commands required to
+@@ -4827,7 +4896,7 @@ i915_gem_init_hw(struct drm_device *dev)
+ {
+ 	struct drm_i915_private *dev_priv = dev->dev_private;
+ 	struct intel_engine_cs *ring;
+-	int ret, i, j, fence_base;
++	int ret, i, j;
+ 
+ 	if (INTEL_INFO(dev)->gen < 6 && !intel_enable_gtt())
+ 		return -EIO;
+@@ -4906,16 +4975,12 @@ i915_gem_init_hw(struct drm_device *dev)
+ 	if (ret)
+ 		goto out;
+ 
+-	fence_base = fence_context_alloc(I915_NUM_RINGS);
+-
+ 	/* Now it is safe to go back round and do everything else: */
+ 	for_each_ring(ring, dev_priv, i) {
+ 		struct drm_i915_gem_request *req;
+ 
+ 		WARN_ON(!ring->default_context);
+ 
+-		ring->fence_context = fence_base + i;
+-
+ 		ret = i915_gem_request_alloc(ring, ring->default_context, &req);
+ 		if (ret) {
+ 			i915_gem_cleanup_ringbuffer(dev);
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 02ceb7a..3c03d1f 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -264,7 +264,7 @@ i915_gem_create_context(struct drm_device *dev,
+ {
+ 	const bool is_global_default_ctx = file_priv == NULL;
+ 	struct intel_context *ctx;
+-	int ret = 0;
++	int i, ret = 0;
+ 
+ 	BUG_ON(!mutex_is_locked(&dev->struct_mutex));
+ 
+@@ -272,6 +272,20 @@ i915_gem_create_context(struct drm_device *dev,
+ 	if (IS_ERR(ctx))
+ 		return ctx;
+ 
++	if (!i915.enable_execlists) {
++		struct intel_engine_cs *ring;
++
++		/* Create a per context timeline for fences */
++		for_each_ring(ring, to_i915(dev), i) {
++			ret = i915_create_fence_timeline(dev, ctx, ring);
++			if (ret) {
++				DRM_ERROR("Fence timeline creation failed for legacy %s: %p\n",
++					  ring->name, ctx);
++				goto err_destroy;
++			}
++		}
++	}
++
+ 	if (is_global_default_ctx && ctx->legacy_hw_ctx.rcs_state) {
+ 		/* We may need to do things with the shrinker which
+ 		 * require us to immediately switch back to the default
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 2795be5..2a46faf 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -2518,6 +2518,14 @@ int intel_lr_context_deferred_alloc(struct intel_context *ctx,
+ 		goto error_ringbuf;
+ 	}
+ 
++	/* Create a per context timeline for fences */
++	ret = i915_create_fence_timeline(dev, ctx, ring);
++	if (ret) {
++		DRM_ERROR("Fence timeline creation failed for ring %s, ctx %p\n",
++			  ring->name, ctx);
++		goto error_ringbuf;
++	}
++
+ 	ctx->engine[ring->id].ringbuf = ringbuf;
+ 	ctx->engine[ring->id].state = ctx_obj;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index d3173ba..49adabd 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -351,7 +351,6 @@ struct  intel_engine_cs {
+ 	 */
+ 	u32 (*get_cmd_length_mask)(u32 cmd_header);
+ 
+-	unsigned fence_context;
+ 	spinlock_t fence_lock;
+ };
+ 
+-- 
+1.7.1
+

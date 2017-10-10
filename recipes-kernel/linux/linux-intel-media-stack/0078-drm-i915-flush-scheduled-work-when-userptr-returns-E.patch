@@ -1,0 +1,25 @@
+From 06f9d24889e5f6c9869807415dee83fed7828548 Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Thu, 28 May 2015 13:29:14 +0800
+Subject: [PATCH 078/153] drm/i915: flush scheduled work when userptr returns EAGAIN It is for HSD 5753275.
+
+---
+ drivers/gpu/drm/i915/i915_gem_execbuffer.c |    2 ++
+ 1 files changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+index b22247c..904c329 100644
+--- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+@@ -1877,6 +1877,8 @@ err:
+ 		i915_gem_request_cancel(params->request);
+ 
+ 	mutex_unlock(&dev->struct_mutex);
++    if (ret == -EAGAIN)
++        flush_scheduled_work();
+ 
+ pre_mutex_err:
+ 	/* intel_gpu_busy should also get a ref, so it will free when the device
+-- 
+1.7.1
+

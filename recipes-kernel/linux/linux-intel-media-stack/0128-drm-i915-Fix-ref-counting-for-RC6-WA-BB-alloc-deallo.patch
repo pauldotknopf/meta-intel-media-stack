@@ -1,0 +1,72 @@
+From 4243ade4c4a62660cd28835b83df4b3badb90cda Mon Sep 17 00:00:00 2001
+From: Andrzej Datczuk <andrzej.datczuk@intel.com>
+Date: Fri, 20 May 2016 12:31:43 +0200
+Subject: [PATCH 128/153] drm/i915: Fix ref counting for RC6 WA BB alloc/dealloc
+
+This patch fixes incorrect states of RC6 WA BB allocation reference
+counter which resulted in RC6 WA BB deallocation when there was stil
+one client attached.
+
+This change should eliminate error message 'RC6 WA BB not ready'
+showing in logs from i915 kernel.
+
+Signed-off-by: Andrzej Datczuk <andrzej.datczuk@intel.com>
+Change-Id: I6fa29f80215e603379b836ca1c4bea17d52d251a
+---
+ drivers/gpu/drm/i915/i915_perfmon.c |   12 +++++-------
+ 1 files changed, 5 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_perfmon.c b/drivers/gpu/drm/i915/i915_perfmon.c
+index 182d97d..656783d 100644
+--- a/drivers/gpu/drm/i915/i915_perfmon.c
++++ b/drivers/gpu/drm/i915/i915_perfmon.c
+@@ -600,8 +600,7 @@ static int allocate_wa_bb(struct drm_i915_private *dev_priv)
+ 			PAGE_SIZE, PIN_MAPPABLE);
+ 
+ 	if (ret) {
+-		drm_gem_object_unreference_unlocked(
+-			&dev_priv->rc6_wa_bb.obj->base);
++		drm_gem_object_unreference(&dev_priv->rc6_wa_bb.obj->base);
+ 		goto unlock;
+ 	}
+ 
+@@ -609,8 +608,7 @@ static int allocate_wa_bb(struct drm_i915_private *dev_priv)
+ 						true);
+ 	if (ret) {
+ 		i915_gem_object_ggtt_unpin(dev_priv->rc6_wa_bb.obj);
+-		drm_gem_object_unreference_unlocked(
+-			&dev_priv->rc6_wa_bb.obj->base);
++		drm_gem_object_unreference(&dev_priv->rc6_wa_bb.obj->base);
+ 		goto unlock;
+ 	}
+ 
+@@ -623,8 +621,7 @@ static int allocate_wa_bb(struct drm_i915_private *dev_priv)
+ 
+ 	if (!dev_priv->rc6_wa_bb.address) {
+ 		i915_gem_object_ggtt_unpin(dev_priv->rc6_wa_bb.obj);
+-		drm_gem_object_unreference_unlocked(
+-			&dev_priv->rc6_wa_bb.obj->base);
++		drm_gem_object_unreference(&dev_priv->rc6_wa_bb.obj->base);
+ 		ret =  -ENOMEM;
+ 		goto unlock;
+ 	}
+@@ -633,6 +630,7 @@ static int allocate_wa_bb(struct drm_i915_private *dev_priv)
+ 
+ unlock:
+ 	if (ret) {
++		atomic_dec(&dev_priv->rc6_wa_bb.enable);
+ 		dev_priv->rc6_wa_bb.obj = NULL;
+ 		dev_priv->rc6_wa_bb.offset = 0;
+ 	}
+@@ -650,7 +648,7 @@ static void deallocate_wa_bb(struct drm_i915_private *dev_priv)
+ 	if (atomic_read(&dev_priv->rc6_wa_bb.enable) == 0)
+ 		goto unlock;
+ 
+-	if (atomic_dec_return(&dev_priv->rc6_wa_bb.enable) > 1)
++	if (atomic_dec_return(&dev_priv->rc6_wa_bb.enable) > 0)
+ 		goto unlock;
+ 
+ 	intel_uncore_forcewake_get(dev_priv, FORCEWAKE_RENDER);
+-- 
+1.7.1
+

@@ -1,0 +1,149 @@
+From a98a6617580c5d38068caa1640258a8e2e283c56 Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Tue, 22 Dec 2015 15:27:06 +0000
+Subject: [PATCH 058/153] drm/i915: Add sync support to the scheduler statistics and status dump
+
+There are useful statistics and debug information about fences that
+can be returned via the scheduler's existing reporting mechanisms
+(sysfs and debug output). These changes were previously part of the
+patches that originally added those mechanisms. However, as the sync
+framework has now been rebased to after the scheduler patches, they
+must now be done as a separate patch on top.
+
+For: VIZ-1587
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+---
+ drivers/gpu/drm/i915/i915_debugfs.c        |    4 ++++
+ drivers/gpu/drm/i915/i915_gem_execbuffer.c |    8 +++++++-
+ drivers/gpu/drm/i915/i915_scheduler.c      |   20 ++++++++++++++++----
+ drivers/gpu/drm/i915/i915_scheduler.h      |    5 +++++
+ 4 files changed, 32 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 581834b..7d633c6 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -3525,6 +3525,10 @@ static int i915_scheduler_info(struct seq_file *m, void *unused)
+ 	PRINT_VAR("  ExecEarly retry",      "u", stats[r].exec_early);
+ 	PRINT_VAR("  ExecFinal requeue",    "u", stats[r].exec_again);
+ 	PRINT_VAR("  ExecFinal killed",     "u", stats[r].exec_dead);
++	PRINT_VAR("  Fence wait",           "u", stats[r].fence_wait);
++	PRINT_VAR("  Fence wait again",     "u", stats[r].fence_again);
++	PRINT_VAR("  Fence wait ignore",    "u", stats[r].fence_ignore);
++	PRINT_VAR("  Fence supplied",       "u", stats[r].fence_got);
+ 	PRINT_VAR("  Hung flying",          "u", stats[r].kill_flying);
+ 	PRINT_VAR("  Hung queued",          "u", stats[r].kill_queued);
+ 	seq_putc(m, '\n');
+diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+index 0b65e3a..eccf8ff 100644
+--- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+@@ -1406,6 +1406,8 @@ eb_get_batch(struct eb_vmas *eb)
+  */
+ static int i915_early_fence_wait(struct intel_engine_cs *ring, int fence_fd)
+ {
++	struct drm_i915_private *dev_priv = ring->dev->dev_private;
++	struct i915_scheduler *scheduler = dev_priv->scheduler;
+ 	struct sync_fence *fence;
+ 	int ret = 0;
+ 
+@@ -1427,8 +1429,12 @@ static int i915_early_fence_wait(struct intel_engine_cs *ring, int fence_fd)
+ 	 * because the the mutex lock has not yet been acquired and
+ 	 * the wait is interruptible.
+ 	 */
+-	if (!i915_safe_to_ignore_fence(ring, fence))
++	if (i915_safe_to_ignore_fence(ring, fence))
++		scheduler->stats[ring->id].fence_ignore++;
++	else {
++		scheduler->stats[ring->id].fence_wait++;
+ 		ret = sync_fence_wait(fence, -1);
++	}
+ 
+ 	sync_fence_put(fence);
+ 	return ret;
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.c b/drivers/gpu/drm/i915/i915_scheduler.c
+index 9a37987..5baf499 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.c
++++ b/drivers/gpu/drm/i915/i915_scheduler.c
+@@ -407,15 +407,20 @@ static void i915_scheduler_wait_fence_signaled(struct sync_fence *fence,
+ static bool i915_scheduler_async_fence_wait(struct drm_device *dev,
+ 				     struct i915_scheduler_queue_entry *node)
+ {
++	struct drm_i915_private *dev_priv = node->params.ring->dev->dev_private;
++	struct i915_scheduler *scheduler = dev_priv->scheduler;
+ 	struct i915_sync_fence_waiter *fence_waiter;
+ 	struct sync_fence *fence = node->params.fence_wait;
+ 	int signaled;
+ 	bool success = true;
+ 
+-	if ((node->flags & I915_QEF_FENCE_WAITING) == 0)
++	if ((node->flags & I915_QEF_FENCE_WAITING) == 0) {
+ 		node->flags |= I915_QEF_FENCE_WAITING;
+-	else
++		scheduler->stats[node->params.ring->id].fence_wait++;
++	} else {
++		scheduler->stats[node->params.ring->id].fence_again++;
+ 		return true;
++	}
+ 
+ 	if (fence == NULL)
+ 		return false;
+@@ -478,8 +483,10 @@ static int i915_scheduler_pop_from_queue_locked(struct intel_engine_cs *ring,
+ 		else
+ 			signalled = true;
+ 
+-		if (!signalled)
++		if (!signalled) {
+ 			signalled = i915_safe_to_ignore_fence(ring, node->params.fence_wait);
++			scheduler->stats[node->params.ring->id].fence_ignore++;
++		}
+ 
+ 		has_local  = false;
+ 		has_remote = false;
+@@ -875,6 +882,9 @@ int i915_scheduler_queue_execbuffer(struct i915_scheduler_queue_entry *qe)
+ 	int i, r;
+ 	int incomplete;
+ 
++	if (qe->params.fence_wait)
++		scheduler->stats[ring->id].fence_got++;
++
+ 	/* Bypass the scheduler and send the buffer immediately? */
+ 	if (!i915.enable_scheduler)
+ 		return i915_scheduler_queue_execbuffer_bypass(qe);
+@@ -1470,7 +1480,7 @@ static int i915_scheduler_dump_locked(struct intel_engine_cs *ring,
+ 					deps++;
+ 
+ 			DRM_DEBUG_DRIVER("<%s>   %c:%02d> uniq = %d, seqno"
+-					 " = %d/%s, deps = %d / %d, %s [pri = "
++					 " = %d/%s, deps = %d / %d, fence = %p/%d, %s [pri = "
+ 					 "%4d]\n", ring->name,
+ 					 i915_scheduler_queue_status_chr(node->status),
+ 					 count,
+@@ -1478,6 +1488,8 @@ static int i915_scheduler_dump_locked(struct intel_engine_cs *ring,
+ 					 node->params.request->seqno,
+ 					 node->params.ring->name,
+ 					 deps, node->num_deps,
++					 node->params.fence_wait,
++					 node->params.fence_wait ? sync_fence_is_signaled(node->params.fence_wait) : 0,
+ 					 i915_qe_state_str(node),
+ 					 node->priority);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.h b/drivers/gpu/drm/i915/i915_scheduler.h
+index edf8459..15d6357 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.h
++++ b/drivers/gpu/drm/i915/i915_scheduler.h
+@@ -111,6 +111,11 @@ struct i915_scheduler_stats {
+ 	uint32_t exec_dead;
+ 	uint32_t kill_flying;
+ 	uint32_t kill_queued;
++
++	uint32_t fence_wait;
++	uint32_t fence_again;
++	uint32_t fence_ignore;
++	uint32_t fence_got;
+ };
+ 
+ struct i915_scheduler {
+-- 
+1.7.1
+

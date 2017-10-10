@@ -1,0 +1,25 @@
+From e0c6c4e53ee8224103b0c20adba27f4e9bc88e9c Mon Sep 17 00:00:00 2001
+From: Hong Liu <hong.liu@intel.com>
+Date: Mon, 8 Aug 2016 11:17:28 +0800
+Subject: [PATCH 142/153] [VPG]: drm/i915: add missing SKL GT2 pci id
+
+Signed-off-by: Hong Liu <hong.liu@intel.com>
+---
+ include/drm/i915_pciids.h |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/include/drm/i915_pciids.h b/include/drm/i915_pciids.h
+index 4505aff..7a1d003 100644
+--- a/include/drm/i915_pciids.h
++++ b/include/drm/i915_pciids.h
+@@ -268,6 +268,7 @@
+ 	INTEL_VGA_DEVICE(0x190A, info) /* SRV GT1 */
+ 
+ #define INTEL_SKL_GT2_IDS(info)	\
++	INTEL_VGA_DEVICE(0x1913, info), /* ULT GT2 */ \
+ 	INTEL_VGA_DEVICE(0x1916, info), /* ULT GT2 */ \
+ 	INTEL_VGA_DEVICE(0x1921, info), /* ULT GT2F */ \
+ 	INTEL_VGA_DEVICE(0x191E, info), /* ULX GT2 */ \
+-- 
+1.7.1
+

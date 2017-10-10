@@ -1,0 +1,114 @@
+From 691bbe79a89383d3858cdf53ae51055494ea2757 Mon Sep 17 00:00:00 2001
+From: Roman Arzumanyan <roman.arzumanyan@intel.com>
+Date: Mon, 26 Sep 2016 13:12:42 +0300
+Subject: [PATCH 149/153] [VPG]: drm/i915: new I915_LOAD_BALANCING_HINT ioctl for per-BB VDBOX balancing
+
+Change-Id: I04e648c5252a401007061c68ba6c59dbd5fe2873
+---
+ drivers/gpu/drm/i915/i915_dma.c |   42 ++++++++++++++++++++++++++++++++++++++-
+ include/uapi/drm/i915_drm.h     |   17 +++++++++++++++
+ 2 files changed, 58 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
+index 82225fb..b4b7a17 100644
+--- a/drivers/gpu/drm/i915/i915_dma.c
++++ b/drivers/gpu/drm/i915/i915_dma.c
+@@ -52,6 +52,45 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/oom.h>
+ 
++static int i915_load_balancing_hint(struct drm_device *dev, void *data,
++	struct drm_file *file_priv)
++{
++	struct drm_i915_private *dev_priv = dev->dev_private;
++	struct drm_i915_ring_load_query *query = data;
++	struct drm_i915_ring_load_info load_info;
++	struct i915_scheduler *scheduler;
++	int i, ring_id;
++
++	scheduler = dev_priv ? dev_priv->scheduler : NULL;
++
++	if (!scheduler || !query || !query->load_info)
++		return EINVAL;
++
++	/* Update performance counters for given rings. */
++	for (i = 0; i < query->query_size; i++) {
++		if (copy_from_user(&load_info, &query->load_info[i], sizeof(load_info)))
++			return EINVAL;
++
++		switch (load_info.ring_id & (I915_EXEC_RING_MASK | I915_EXEC_BSD_MASK)) {
++		case I915_EXEC_BSD | I915_EXEC_BSD_RING1:
++			ring_id = VCS;
++			break;
++		case I915_EXEC_BSD | I915_EXEC_BSD_RING2:
++			ring_id = VCS2;
++			break;
++		default:
++			return EINVAL;
++		}
++
++		load_info.load_cnt = scheduler->counts[ring_id].flying +
++			scheduler->counts[ring_id].queued;
++
++		if (copy_to_user(&query->load_info[i], &load_info, sizeof(load_info)))
++			return EINVAL;
++	}
++
++	return 0;
++}
+ 
+ static int i915_getparam(struct drm_device *dev, void *data,
+ 			 struct drm_file *file_priv)
+@@ -1358,7 +1397,8 @@ const struct drm_ioctl_desc i915_ioctls[] = {
+ 	DRM_IOCTL_DEF_DRV(I915_GEM_USERPTR, i915_gem_userptr_ioctl, DRM_RENDER_ALLOW),
+ 	DRM_IOCTL_DEF_DRV(I915_GEM_CONTEXT_GETPARAM, i915_gem_context_getparam_ioctl, DRM_RENDER_ALLOW),
+ 	DRM_IOCTL_DEF_DRV(I915_GEM_CONTEXT_SETPARAM, i915_gem_context_setparam_ioctl, DRM_RENDER_ALLOW),
+-        DRM_IOCTL_DEF_DRV(I915_PERFMON, i915_perfmon_ioctl, DRM_UNLOCKED|DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(I915_PERFMON, i915_perfmon_ioctl, DRM_UNLOCKED|DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(I915_LOAD_BALANCING_HINT, i915_load_balancing_hint, DRM_RENDER_ALLOW),
+ };
+ 
+ int i915_max_ioctl = ARRAY_SIZE(i915_ioctls);
+diff --git a/include/uapi/drm/i915_drm.h b/include/uapi/drm/i915_drm.h
+index 18fbe80..b455f5b 100644
+--- a/include/uapi/drm/i915_drm.h
++++ b/include/uapi/drm/i915_drm.h
+@@ -233,6 +233,7 @@ typedef struct _drm_i915_sarea {
+ #define DRM_I915_GEM_CONTEXT_SETPARAM	0x35
+ #define DRM_I915_GEM_CONTEXT_CREATE2	0x36
+ #define DRM_I915_PERFMON		0x3e
++#define DRM_I915_LOAD_BALANCING_HINT	0x3f
+ 
+ #define DRM_IOCTL_I915_INIT		DRM_IOW( DRM_COMMAND_BASE + DRM_I915_INIT, drm_i915_init_t)
+ #define DRM_IOCTL_I915_FLUSH		DRM_IO ( DRM_COMMAND_BASE + DRM_I915_FLUSH)
+@@ -289,6 +290,7 @@ typedef struct _drm_i915_sarea {
+ #define DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM	DRM_IOWR (DRM_COMMAND_BASE + DRM_I915_GEM_CONTEXT_SETPARAM, struct drm_i915_gem_context_param)
+ 
+ #define DRM_IOCTL_I915_PERFMON		DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_PERFMON, struct drm_i915_perfmon)
++#define DRM_IOCTL_I915_LOAD_BALANCING_HINT		DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_LOAD_BALANCING_HINT, struct drm_i915_ring_load_query)
+ 
+ /* Allow drivers to submit batchbuffers directly to hardware, relying
+  * on the security mechanisms provided by hardware.
+@@ -1172,4 +1174,19 @@ struct drm_i915_gem_context_param {
+ 	__u64 value;
+ };
+ 
++typedef struct drm_i915_ring_load_info
++{
++	/** ID of ring & load counter*/
++	int ring_id;
++	int load_cnt;
++} drm_i915_ring_load_info;
++
++typedef struct drm_i915_ring_load_query
++{
++	/** Number of rings, load counters of which we want to query & ptr to array
++	  * of load info structures */
++	int query_size;
++	drm_i915_ring_load_info __user *load_info;
++} drm_i915_ring_load_query;
++
+ #endif /* _UAPI_I915_DRM_H_ */
+-- 
+1.7.1
+

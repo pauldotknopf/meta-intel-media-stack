@@ -1,0 +1,153 @@
+From 1858ed50c61a413c72463540bb8e240f5e78366d Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Wed, 25 Feb 2015 13:14:21 +0000
+Subject: [PATCH 009/153] drm/i915: Removed now redudant parameter to i915_gem_request_completed()
+
+The change to the implementation of i915_gem_request_completed() means
+that the lazy coherency flag is no longer used. This can now be
+removed to simplify the interface.
+
+v6: Updated to newer nigthly and resolved conflicts.
+
+For: VIZ-5190
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+---
+ drivers/gpu/drm/i915/i915_debugfs.c  |    2 +-
+ drivers/gpu/drm/i915/i915_drv.h      |    3 +--
+ drivers/gpu/drm/i915/i915_gem.c      |   14 +++++++-------
+ drivers/gpu/drm/i915/intel_display.c |    2 +-
+ drivers/gpu/drm/i915/intel_pm.c      |    4 ++--
+ 5 files changed, 12 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 66d8bc0..8518da5 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -601,7 +601,7 @@ static int i915_gem_pageflip_info(struct seq_file *m, void *data)
+ 					   i915_gem_request_get_seqno(work->flip_queued_req),
+ 					   dev_priv->next_seqno,
+ 					   ring->get_seqno(ring, true),
+-					   i915_gem_request_completed(work->flip_queued_req, true));
++					   i915_gem_request_completed(work->flip_queued_req));
+ 			} else
+ 				seq_printf(m, "Flip not associated with any ring\n");
+ 			seq_printf(m, "Flip queued on frame %d, (was ready on frame %d), now %d\n",
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index b47aa03..5cda57a 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2287,8 +2287,7 @@ int i915_gem_request_alloc(struct intel_engine_cs *ring,
+ 			   struct drm_i915_gem_request **req_out);
+ void i915_gem_request_cancel(struct drm_i915_gem_request *req);
+ 
+-static inline bool i915_gem_request_completed(struct drm_i915_gem_request *req,
+-					      bool lazy_coherency)
++static inline bool i915_gem_request_completed(struct drm_i915_gem_request *req)
+ {
+ 	return fence_is_signaled(&req->fence);
+ }
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 64a6530..dfdb07e 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1263,7 +1263,7 @@ int __i915_wait_request(struct drm_i915_gem_request *req,
+ 	if (list_empty(&req->list))
+ 		return 0;
+ 
+-	if (i915_gem_request_completed(req, true))
++	if (i915_gem_request_completed(req))
+ 		return 0;
+ 
+ 	timeout_expire = 0;
+@@ -1313,7 +1313,7 @@ int __i915_wait_request(struct drm_i915_gem_request *req,
+ 			break;
+ 		}
+ 
+-		if (i915_gem_request_completed(req, false)) {
++		if (i915_gem_request_completed(req)) {
+ 			ret = 0;
+ 			break;
+ 		}
+@@ -2815,7 +2815,7 @@ i915_gem_find_active_request(struct intel_engine_cs *ring)
+ 	struct drm_i915_gem_request *request;
+ 
+ 	list_for_each_entry(request, &ring->request_list, list) {
+-		if (i915_gem_request_completed(request, false))
++		if (i915_gem_request_completed(request))
+ 			continue;
+ 
+ 		return request;
+@@ -2951,7 +2951,7 @@ i915_gem_retire_requests_ring(struct intel_engine_cs *ring)
+ 					   struct drm_i915_gem_request,
+ 					   list);
+ 
+-		if (!i915_gem_request_completed(request, true))
++		if (!i915_gem_request_completed(request))
+ 			break;
+ 
+ 		i915_gem_request_retire(request);
+@@ -2975,7 +2975,7 @@ i915_gem_retire_requests_ring(struct intel_engine_cs *ring)
+ 	}
+ 
+ 	if (unlikely(ring->trace_irq_req &&
+-		     i915_gem_request_completed(ring->trace_irq_req, true))) {
++		     i915_gem_request_completed(ring->trace_irq_req))) {
+ 		ring->irq_put(ring);
+ 		i915_gem_request_assign(&ring->trace_irq_req, NULL);
+ 	}
+@@ -3081,7 +3081,7 @@ i915_gem_object_flush_active(struct drm_i915_gem_object *obj)
+ 		if (list_empty(&req->list))
+ 			goto retire;
+ 
+-		if (i915_gem_request_completed(req, true)) {
++		if (i915_gem_request_completed(req)) {
+ 			__i915_gem_request_retire__upto(req);
+ retire:
+ 			i915_gem_object_retire__read(obj, i);
+@@ -3193,7 +3193,7 @@ __i915_gem_object_sync(struct drm_i915_gem_object *obj,
+ 	if (to == from)
+ 		return 0;
+ 
+-	if (i915_gem_request_completed(from_req, true))
++	if (i915_gem_request_completed(from_req))
+ 		return 0;
+ 
+ 	if (!i915_semaphore_is_enabled(obj->base.dev)) {
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 32cf973..2876536 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -11346,7 +11346,7 @@ static bool __intel_pageflip_stall_check(struct drm_device *dev,
+ 
+ 	if (work->flip_ready_vblank == 0) {
+ 		if (work->flip_queued_req &&
+-		    !i915_gem_request_completed(work->flip_queued_req, true))
++		    !i915_gem_request_completed(work->flip_queued_req))
+ 			return false;
+ 
+ 		work->flip_ready_vblank = drm_crtc_vblank_count(crtc);
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 7dde9d3..50b3811 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -7288,7 +7288,7 @@ static void __intel_rps_boost_work(struct work_struct *work)
+ 	struct request_boost *boost = container_of(work, struct request_boost, work);
+ 	struct drm_i915_gem_request *req = boost->req;
+ 
+-	if (!i915_gem_request_completed(req, true))
++	if (!i915_gem_request_completed(req))
+ 		gen6_rps_boost(to_i915(req->ring->dev), NULL,
+ 			       req->emitted_jiffies);
+ 
+@@ -7304,7 +7304,7 @@ void intel_queue_rps_boost_for_request(struct drm_device *dev,
+ 	if (req == NULL || INTEL_INFO(dev)->gen < 6)
+ 		return;
+ 
+-	if (i915_gem_request_completed(req, true))
++	if (i915_gem_request_completed(req))
+ 		return;
+ 
+ 	boost = kmalloc(sizeof(*boost), GFP_ATOMIC);
+-- 
+1.7.1
+

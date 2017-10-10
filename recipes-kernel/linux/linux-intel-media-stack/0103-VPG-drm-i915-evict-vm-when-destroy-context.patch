@@ -1,0 +1,28 @@
+From c4949c328bb33ed2d493dd2cacaa37988b0756a2 Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Fri, 11 Mar 2016 03:19:11 -0500
+Subject: [PATCH 103/153] [VPG]: drm/i915: evict vm when destroy context
+
+One context creates at least two bo in the GTT aperture space,
+In multiple sessions, it might cause fragment in GTT aperture space,
+evict vm in time to mitigate it.
+---
+ drivers/gpu/drm/i915/i915_gem_context.c |    2 ++
+ 1 files changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index d985111..56fc62a 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -913,6 +913,8 @@ int i915_gem_context_destroy_ioctl(struct drm_device *dev, void *data,
+ 	}
+ 
+ 	idr_remove(&ctx->file_priv->context_idr, ctx->user_handle);
++	if (ctx->ppgtt)
++		i915_gem_evict_vm(&ctx->ppgtt->base, true);
+ 	i915_gem_context_unreference(ctx);
+ 	mutex_unlock(&dev->struct_mutex);
+ 
+-- 
+1.7.1
+

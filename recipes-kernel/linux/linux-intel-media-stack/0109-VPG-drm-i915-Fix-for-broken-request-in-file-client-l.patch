@@ -1,0 +1,98 @@
+From d7cd71e007384f4a00ffda87b8e72ecada502e6a Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Mon, 4 Apr 2016 08:47:29 -0400
+Subject: [PATCH 109/153] [VPG]: drm/i915: Fix for broken request in file client list
+
+If an execbuff IOCTL call fails for some reason, it would leave the
+request in the client list. The request clean up code would remove
+this but only later on and only after the reference count has dropped
+to zero. However, before that happens there is the possibilty of the
+throttle IOCTL getting in and attempting to process the request having
+found it on the client list. That leads to invalid operations on an
+object with a zero reference count at best, at worst dereferencing
+dangling pointers and a kernel panic.
+---
+ drivers/gpu/drm/i915/i915_drv.h            |    1 +
+ drivers/gpu/drm/i915/i915_gem.c            |    5 ++---
+ drivers/gpu/drm/i915/i915_gem_execbuffer.c |   10 +++++++---
+ 3 files changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index a9df90e..f5ae8d1 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2402,6 +2402,7 @@ static inline bool i915_gem_request_completed(struct drm_i915_gem_request *req)
+ 
+ int i915_gem_request_add_to_client(struct drm_i915_gem_request *req,
+ 				   struct drm_file *file);
++void i915_gem_request_remove_from_client(struct drm_i915_gem_request *request);
+ 
+ static inline uint32_t
+ i915_gem_request_get_seqno(struct drm_i915_gem_request *req)
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index a6ed001..b23c747 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1489,8 +1489,7 @@ int i915_gem_request_add_to_client(struct drm_i915_gem_request *req,
+ 	return 0;
+ }
+ 
+-static inline void
+-i915_gem_request_remove_from_client(struct drm_i915_gem_request *request)
++void i915_gem_request_remove_from_client(struct drm_i915_gem_request *request)
+ {
+ 	struct drm_i915_file_private *file_priv = request->file_priv;
+ 
+@@ -2838,7 +2837,7 @@ static void i915_gem_request_free(struct drm_i915_gem_request *req)
+ 
+ 	WARN_ON(!mutex_is_locked(&req->ring->dev->struct_mutex));
+ 
+-	if (req->file_priv)
++	if (WARN_ON(req->file_priv))
+ 		i915_gem_request_remove_from_client(req);
+ 
+ 	if (ctx) {
+diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+index 186f55e..78dba05 100644
+--- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+@@ -1782,14 +1782,14 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
+ 			DRM_ERROR("Wait fence for ring %d has invalid id %d\n",
+ 				  (int) ring->id, fd_fence_wait);
+ 			ret = -EINVAL;
+-			goto err_batch_unpin;
++			goto err_client;
+ 		} else {
+ 			params->fence_wait = sync_fence_fdget(fd_fence_wait);
+ 			if (params->fence_wait == NULL) {
+ 				DRM_ERROR("Invalid wait fence %d\n",
+ 					  fd_fence_wait);
+ 				ret = -EINVAL;
+-				goto err_batch_unpin;
++				goto err_client;
+ 			}
+ 		}
+ 	}
+@@ -1805,7 +1805,7 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
+ 		if (ret) {
+ 			DRM_ERROR("Fence creation failed for ring %d, ctx %p\n",
+ 				  ring->id, ctx);
+-			goto err_batch_unpin;
++			goto err_client;
+ 		}
+ 	}
+ 
+@@ -1851,6 +1851,10 @@ err_fence:
+ 		put_unused_fd(fd_fence_complete);
+ 	}
+ 
++err_client:
++	if (params->request->file_priv)
++		i915_gem_request_remove_from_client(params->request);
++
+ err_batch_unpin:
+ 	if (dispatch_flags & I915_DISPATCH_SECURE)
+ 		i915_gem_execbuff_release_batch_obj(batch_obj);
+-- 
+1.7.1
+

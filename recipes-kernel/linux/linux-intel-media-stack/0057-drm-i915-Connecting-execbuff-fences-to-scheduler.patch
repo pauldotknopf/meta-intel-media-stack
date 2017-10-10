@@ -1,0 +1,100 @@
+From ba7ae20ae6898f0f595e9808beaabb3142baa784 Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Wed, 10 Jun 2015 16:24:37 +0100
+Subject: [PATCH 057/153] drm/i915: Connecting execbuff fences to scheduler
+
+The scheduler now supports sync framework fences being associated with
+batch buffers. The execbuff IOCTL allows such fences to be passed in
+from user land. This patch wires the two together so that the IOCTL no
+longer needs to stall on the fence immediately. Instead the stall is
+now swallowed by the scheduler's scheduling algorithm.
+
+v0.1: Updated a comment that would become incorrect after this patch.
+
+*v2* Added a 'return -EINVAL' in the case of invalid input fences.
+
+For: VIZ-1587
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+---
+ drivers/gpu/drm/i915/i915_gem_execbuffer.c |   29 ++++++++++++++++++++++++---
+ drivers/gpu/drm/i915/i915_scheduler.c      |    3 ++
+ 2 files changed, 28 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+index db71c1b..0b65e3a 100644
+--- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+@@ -1400,9 +1400,9 @@ eb_get_batch(struct eb_vmas *eb)
+ }
+ 
+ /*
+- * Do a synchronous wait on any incoming fence object (until the scheduler
+- * arrives and implements asynchronous waits). NB: This must be called before
+- * acquiring the driver mutex lock!
++ * Do a synchronous wait on any incoming fence object (e.g. in the case where
++ * the scheduler is disabled). NB: This must be called before acquiring the
++ * driver mutex lock!
+  */
+ static int i915_early_fence_wait(struct intel_engine_cs *ring, int fence_fd)
+ {
+@@ -1551,7 +1551,8 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
+ 	/*
+ 	 * Without a GPU scheduler, any fence waits must be done up front.
+ 	 */
+-	if (args->flags & I915_EXEC_WAIT_FENCE) {
++	if ((args->flags & I915_EXEC_WAIT_FENCE) &&
++	    (!i915_scheduler_is_enabled(dev))) {
+ 		ret = i915_early_fence_wait(ring, fd_fence_wait);
+ 		if (ret < 0)
+ 			return ret;
+@@ -1743,6 +1744,23 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
+ 	i915_gem_context_reference(ctx);
+ 	params->ctx = ctx;
+ 
++	if (args->flags & I915_EXEC_WAIT_FENCE) {
++		if (fd_fence_wait < 0) {
++			DRM_ERROR("Wait fence for ring %d has invalid id %d\n",
++				  (int) ring->id, fd_fence_wait);
++			ret = -EINVAL;
++			goto err_batch_unpin;
++		} else {
++			params->fence_wait = sync_fence_fdget(fd_fence_wait);
++			if (params->fence_wait == NULL) {
++				DRM_ERROR("Invalid wait fence %d\n",
++					  fd_fence_wait);
++				ret = -EINVAL;
++				goto err_batch_unpin;
++			}
++		}
++	}
++
+ 	if (args->flags & I915_EXEC_CREATE_FENCE) {
+ 		/*
+ 		 * Caller has requested a sync fence.
+@@ -1820,6 +1838,9 @@ err:
+ 	if (params->ctx)
+ 		i915_gem_context_unreference(params->ctx);
+ 
++	if (params->fence_wait)
++		sync_fence_put(params->fence_wait);
++
+ 	/*
+ 	 * If the request was created but not successfully submitted then it
+ 	 * must be freed again. If it was submitted then it is being tracked
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.c b/drivers/gpu/drm/i915/i915_scheduler.c
+index c3a0680..9a37987 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.c
++++ b/drivers/gpu/drm/i915/i915_scheduler.c
+@@ -478,6 +478,9 @@ static int i915_scheduler_pop_from_queue_locked(struct intel_engine_cs *ring,
+ 		else
+ 			signalled = true;
+ 
++		if (!signalled)
++			signalled = i915_safe_to_ignore_fence(ring, node->params.fence_wait);
++
+ 		has_local  = false;
+ 		has_remote = false;
+ 		for (i = 0; i < node->num_deps; i++) {
+-- 
+1.7.1
+

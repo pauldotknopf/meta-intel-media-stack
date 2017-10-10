@@ -1,0 +1,85 @@
+From 8c6bb62139bc448a90bf2ac0904c15615d41f67f Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Fri, 22 Apr 2016 00:32:06 -0400
+Subject: [PATCH 117/153] [VPG]: drm/i915: add trace point for mvp
+
+Convert trace_prink to trace event, since trace_printk is used for kernel debug,
+should not be used in production kernel.
+---
+ drivers/gpu/drm/i915/i915_mvp.c   |    7 ++-----
+ drivers/gpu/drm/i915/i915_trace.h |   34 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 36 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_mvp.c b/drivers/gpu/drm/i915/i915_mvp.c
+index fd1b8b2..6a3b091 100644
+--- a/drivers/gpu/drm/i915/i915_mvp.c
++++ b/drivers/gpu/drm/i915/i915_mvp.c
+@@ -27,6 +27,7 @@
+ #include <linux/kernel.h>
+ #include <drm/drm.h>
+ #include "i915_drv.h"
++#include "i915_trace.h"
+ 
+ struct i915_mvp_info {
+ 	struct drm_i915_gem_object *buf_obj;
+@@ -160,11 +161,7 @@ void i915_mvp_init_req(struct drm_i915_gem_request *req, u32 perf_tag)
+ void i915_mvp_read_req(struct drm_i915_gem_request *req)
+ {
+ 	if (i915_mvp.enabled && req->mvp_req.cpu_addr != NULL)
+-		trace_printk("pid=%d tag=%x uniq=%u seqno=%u ring=%d cpu_time=%llx gpu_time=%llx start=%llx end=%llx\n",
+-		     		req->mvp_req.pid, req->mvp_req.perf_tag, req->uniq, req->seqno,
+-		     		req->ring->id, req->mvp_req.cpu_time, req->mvp_req.gpu_time,
+-		     		req->mvp_req.cpu_addr->start_time,
+-		     		req->mvp_req.cpu_addr->end_time);
++		trace_i915_mvp_read_req(req);
+ }
+ 
+ int i915_mvp_start_task(struct drm_device *dev,
+diff --git a/drivers/gpu/drm/i915/i915_trace.h b/drivers/gpu/drm/i915/i915_trace.h
+index d6af52d..4fcb2ce 100644
+--- a/drivers/gpu/drm/i915/i915_trace.h
++++ b/drivers/gpu/drm/i915/i915_trace.h
+@@ -1019,6 +1019,40 @@ TRACE_EVENT(i915_gem_ring_queue,
+ 		      __entry->uniq, __entry->seqno)
+ );
+ 
++TRACE_EVENT(i915_mvp_read_req,
++	    TP_PROTO(struct drm_i915_gem_request *req),
++	    TP_ARGS(req),
++
++	    TP_STRUCT__entry(
++			     __field(u32, pid)
++			     __field(u32, tag)
++			     __field(u32, uniq)
++			     __field(u32, seqno)
++			     __field(u32, ring)
++			     __field(u64, cpu_time)
++			     __field(u64, gpu_time)
++			     __field(u64, start)
++			     __field(u64, end)
++			     ),
++
++	    TP_fast_assign(
++			   __entry->pid = req->mvp_req.pid;
++			   __entry->tag = req->mvp_req.perf_tag;
++			   __entry->uniq = req->uniq;
++			   __entry->seqno = req->seqno;
++			   __entry->ring = req->ring->id;
++			   __entry->cpu_time = req->mvp_req.cpu_time;
++			   __entry->gpu_time = req->mvp_req.gpu_time;
++			   __entry->start = req->mvp_req.cpu_addr->start_time;
++			   __entry->end = req->mvp_req.cpu_addr->end_time;
++			   ),
++
++	    TP_printk("pid=%d tag=%x uniq=%u seqno=%u ring=%d cpu_time=%llx gpu_time=%llx start=%llx end=%llx",
++		      __entry->pid, __entry->tag, __entry->uniq, __entry->seqno, __entry->ring,
++		      __entry->cpu_time, __entry->gpu_time, __entry->start, __entry->end)
++);
++
++
+ #endif /* _I915_TRACE_H_ */
+ 
+ /* This part must be outside protection */
+-- 
+1.7.1
+

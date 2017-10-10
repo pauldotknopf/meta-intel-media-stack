@@ -1,0 +1,87 @@
+From 2d1ae3bb1f3f54ef6ff759f5a04d35c7d78e9092 Mon Sep 17 00:00:00 2001
+From: John Harrison <John.C.Harrison@Intel.com>
+Date: Tue, 1 Apr 2014 17:49:16 +0100
+Subject: [PATCH 021/153] drm/i915: Prepare retire_requests to handle out-of-order seqnos
+
+A major point of the GPU scheduler is that it re-orders batch buffers
+after they have been submitted to the driver. This leads to requests
+completing out of order. In turn, this means that the retire
+processing can no longer assume that all completed entries are at the
+front of the list. Rather than attempting to re-order the request list
+on a regular basis, it is better to simply scan the entire list.
+
+v2: Removed deferred free code as no longer necessary due to request
+handling updates.
+
+For: VIZ-1587
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+Reviewed-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+---
+ drivers/gpu/drm/i915/i915_gem.c |   31 +++++++++++++------------------
+ 1 files changed, 13 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 16049ee..208939d 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -3225,6 +3225,7 @@ void i915_gem_reset(struct drm_device *dev)
+ void
+ i915_gem_retire_requests_ring(struct intel_engine_cs *ring)
+ {
++	struct drm_i915_gem_object *obj, *obj_next;
+ 	struct drm_i915_gem_request *req, *req_next;
+ 	LIST_HEAD(list_head);
+ 
+@@ -3237,37 +3238,31 @@ i915_gem_retire_requests_ring(struct intel_engine_cs *ring)
+ 	 */
+ 	i915_gem_request_notify(ring, false);
+ 
++	/*
++	 * Note that request entries might be out of order due to rescheduling
++	 * and pre-emption. Thus both lists must be processed in their entirety
++	 * rather than stopping at the first non-complete entry.
++	 */
++
+ 	/* Retire requests first as we use it above for the early return.
+ 	 * If we retire requests last, we may use a later seqno and so clear
+ 	 * the requests lists without clearing the active list, leading to
+ 	 * confusion.
+ 	 */
+-	while (!list_empty(&ring->request_list)) {
+-		struct drm_i915_gem_request *request;
+-
+-		request = list_first_entry(&ring->request_list,
+-					   struct drm_i915_gem_request,
+-					   list);
+-
+-		if (!i915_gem_request_completed(request))
+-			break;
++	list_for_each_entry_safe(req, req_next, &ring->request_list, list) {
++		if (!i915_gem_request_completed(req))
++			continue;
+ 
+-		i915_gem_request_retire(request);
++		i915_gem_request_retire(req);
+ 	}
+ 
+ 	/* Move any buffers on the active list that are no longer referenced
+ 	 * by the ringbuffer to the flushing/inactive lists as appropriate,
+ 	 * before we free the context associated with the requests.
+ 	 */
+-	while (!list_empty(&ring->active_list)) {
+-		struct drm_i915_gem_object *obj;
+-
+-		obj = list_first_entry(&ring->active_list,
+-				      struct drm_i915_gem_object,
+-				      ring_list[ring->id]);
+-
++	list_for_each_entry_safe(obj, obj_next, &ring->active_list, ring_list[ring->id]) {
+ 		if (!list_empty(&obj->last_read_req[ring->id]->list))
+-			break;
++			continue;
+ 
+ 		i915_gem_object_retire__read(obj, ring->id);
+ 	}
+-- 
+1.7.1
+
