@@ -17,7 +17,8 @@ SECTION = "x11"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://COPYING;md5=2e48940f94acb0af582e5ef03537800f"
 
-SRC_URI = "file://libva-1.67.0.pre1.tar.bz2"
+SRC_URI = "${LINUX_MEDIA_SERVER_STUDIO_LOCATION}"
+SRC_URI[md5sum] = "53c61007222244ebf1add8e86168c94b"
 
 S = "${WORKDIR}/libva-1.67.0.pre1"
 
@@ -45,3 +46,9 @@ FILES_${PN}-tpi =+ "${libdir}/libva-tpi*${SOLIBS}"
 FILES_${PN}-glx =+ "${libdir}/libva-glx*${SOLIBS}"
 FILES_${PN}-egl =+ "${libdir}/libva-egl*${SOLIBS}"
 FILES_${PN}-wayland =+ "${libdir}/libva-wayland*${SOLIBS}"
+
+do_unpack_libva() {
+    tar -xvpf ${WORKDIR}/opt/intel/mediasdk/opensource/libva/1.67.0.pre1-64009/libva-1.67.0.pre1.tar.bz2 -C ${WORKDIR}
+}
+
+do_unpack[postfuncs] += "do_unpack_libva"

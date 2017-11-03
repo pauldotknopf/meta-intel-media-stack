@@ -10,10 +10,8 @@ LIC_FILES_CHKSUM = "file://xf86drm.c;beginline=9;endline=32;md5=c8a3b961af7667c5
 PROVIDES = "drm"
 DEPENDS = "libpthread-stubs libpciaccess"
 
-SRC_URI = "file://${BP}.tar.bz2"
-
-SRC_URI[md5sum] = "57b0589122ec4b8d5dfb9e430a21f0b3"
-SRC_URI[sha256sum] = "2d5a500eef412cc287d12268eed79d571e262d4957a2ec9258073f305985054f"
+SRC_URI = "${LINUX_MEDIA_SERVER_STUDIO_LOCATION}"
+SRC_URI[md5sum] = "53c61007222244ebf1add8e86168c94b"
 
 inherit autotools pkgconfig manpages
 
@@ -44,3 +42,9 @@ FILES_${PN}-kms = "${libdir}/libkms*.so.*"
 FILES_${PN}-freedreno = "${libdir}/libdrm_freedreno.so.*"
 FILES_${PN}-amdgpu = "${libdir}/libdrm_amdgpu.so.*"
 FILES_${PN}-etnaviv = "${libdir}/libdrm_etnaviv.so.*"
+
+do_unpack_libdrm() {
+    tar -xvpf ${WORKDIR}/opt/intel/mediasdk/opensource/libdrm/2.4.67-64009/libdrm-2.4.67.tar.bz2 -C ${WORKDIR}
+}
+
+do_unpack[postfuncs] += "do_unpack_libdrm"
