@@ -7,6 +7,10 @@ RPM_PATH="${THISDIR}/files"
 
 SRC_URI = "${LINUX_MEDIA_SERVER_STUDIO_LOCATION}"
 SRC_URI[md5sum] = "53c61007222244ebf1add8e86168c94b"
+SRC_URI = "\
+        file://vaapi-env.sh \
+        file://vaapi-env.conf \
+        "
 
 DEPENDS = "libdrm virtual/mesa virtual/libgles1 virtual/libgles2 virtual/egl libva"
 RDEPENDS_${PN} += " libdrm"
@@ -21,6 +25,10 @@ do_install() {
         for f in ${WORKDIR}/opt/intel/common/mdf/lib64/*; do
                 install $f ${D}${libdir};
         done
+        install -d ${D}${sysconfdir}/profile.d
+	install -m 0755 ${WORKDIR}/vaapi-env.sh ${D}${sysconfdir}/profile.d/
+        install -d ${D}${sysconfdir}/systemd/system.conf.d/
+        install -m 0755 ${WORKDIR}/vaapi-env.conf ${D}${sysconfdir}/systemd/system.conf.d/
 }
 
 # Disable some QA checks that file with the precompiled binaries.
