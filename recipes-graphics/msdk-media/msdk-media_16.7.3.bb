@@ -7,7 +7,7 @@ RPM_PATH="${THISDIR}/files"
 
 SRC_URI = "${LINUX_MEDIA_SERVER_STUDIO_LOCATION}"
 SRC_URI[md5sum] = "53c61007222244ebf1add8e86168c94b"
-SRC_URI = "\
+SRC_URI += "\
         file://vaapi-env.sh \
         file://vaapi-env.conf \
         "
