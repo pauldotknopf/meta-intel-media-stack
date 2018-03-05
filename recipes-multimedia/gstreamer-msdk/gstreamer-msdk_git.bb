@@ -4,8 +4,10 @@ LIC_FILES_CHKSUM = "file://COPYING.LIB;md5=4fbd65380cdd255951079008b364516c"
 
 SRC_URI = "git://github.com/intel/gstreamer-media-SDK.git;protocol=https;branch=master"
 
-SRCREV = "${AUTOREV}"
+SRCREV = "be926889d28b175cbb46c98c2ec441e62ecd3851"
 PV = "git${SRCPV}"
+
+SRC_URI += "file://0001-fix-lib-paths-for-mfx.patch"
 
 inherit cmake
 
