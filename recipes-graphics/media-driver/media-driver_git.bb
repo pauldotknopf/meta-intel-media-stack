@@ -18,6 +18,7 @@ SRC_URI = "git://github.com/intel/media-driver.git;name=mediadriver;destsuffix=m
 
 SRC_URI += "file://0001-media-driver-disable-tests.patch"
 SRC_URI += "file://0002-gmmlib-disable-tests.patch"
+SRC_URI += "file://vaapi-env.conf"
 
 S = "${WORKDIR}/media-driver"
 
@@ -42,6 +43,11 @@ do_patch() {
     patch -p1 < ${WORKDIR}/0001-media-driver-disable-tests.patch
     cd ../gmmlib
     patch -p1 < ${WORKDIR}/0002-gmmlib-disable-tests.patch
+}
+
+do_install_append() {
+    install -d ${D}${sysconfdir}/systemd/system.conf.d/
+    install -m 0755 ${WORKDIR}/vaapi-env.conf ${D}${sysconfdir}/systemd/system.conf.d/
 }
 
 FILES_${PN} += "${libdir} ${libdir}/dir"

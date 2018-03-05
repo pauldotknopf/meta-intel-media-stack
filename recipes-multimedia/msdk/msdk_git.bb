@@ -37,3 +37,8 @@ FILES_${PN} += "/opt/intel/mediasdk/lib/*.so /opt/intel/mediasdk/plugins/*"
 FILES_${PN}-staticdev += "/opt/intel/mediasdk/lib/*.a"
 FILES_${PN}-samples += "/opt/intel/mediasdk/samples/*"
 FILES_${PN}-dev += "/opt/intel/mediasdk/include /opt/intel/mediasdk/lib/pkgconfig/*"
+
+SYSROOT_PREPROCESS_FUNCS += "msdk_populate_sysroot"
+msdk_populate_sysroot() {
+        sysroot_stage_dir ${D}/opt ${SYSROOT_DESTDIR}/opt
+}
