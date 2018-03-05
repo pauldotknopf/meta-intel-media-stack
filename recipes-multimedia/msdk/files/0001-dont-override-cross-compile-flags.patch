@@ -1,0 +1,48 @@
+diff --git a/builder/FindGlobals.cmake b/builder/FindGlobals.cmake
+index 20166d0..5c56e45 100644
+--- a/builder/FindGlobals.cmake
++++ b/builder/FindGlobals.cmake
+@@ -92,43 +92,12 @@ if( Linux OR Darwin )
+     set(no_warnings "-Wno-deprecated-declarations -Wno-unknown-pragmas -Wno-unused")
+   endif()
+ 
+-  set(CMAKE_C_FLAGS "-pipe -fPIC")
+-  set(CMAKE_CXX_FLAGS "-pipe -fPIC")
+-  append("-fPIE -pie" CMAKE_EXEC_LINKER_FLAGS)
+-
+-  # CACHE + FORCE should be used only here to make sure that this parameters applied globally
+-  set(CMAKE_C_FLAGS_DEBUG     "-O0 -Wall ${no_warnings}  -Wformat -Wformat-security -g -D_DEBUG" CACHE STRING "" FORCE)
+-  set(CMAKE_C_FLAGS_RELEASE   "-O2 -D_FORTIFY_SOURCE=2 -fstack-protector -Wall ${no_warnings} -Wformat -Wformat-security -DNDEBUG"    CACHE STRING "" FORCE)
+-  set(CMAKE_CXX_FLAGS_DEBUG   "-O0 -Wall ${no_warnings}  -Wformat -Wformat-security -g -D_DEBUG" CACHE STRING "" FORCE)
+-  set(CMAKE_CXX_FLAGS_RELEASE "-O2 -D_FORTIFY_SOURCE=2 -fstack-protector -Wall ${no_warnings}  -Wformat -Wformat-security -DNDEBUG"    CACHE STRING "" FORCE)
+-
+   if ( Darwin )
+     if (CMAKE_C_COMPILER MATCHES clang)
+        set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -v -std=c++11 -stdlib=libc++")
+     endif()
+   endif()
+ 
+-  if (DEFINED CMAKE_FIND_ROOT_PATH)
+-#    append("--sysroot=${CMAKE_FIND_ROOT_PATH} " CMAKE_C_FLAGS)
+-#    append("--sysroot=${CMAKE_FIND_ROOT_PATH} " CMAKE_CXX_FLAGS)
+-    append("--sysroot=${CMAKE_FIND_ROOT_PATH} " LINK_FLAGS)
+-  endif (DEFINED CMAKE_FIND_ROOT_PATH)
+-
+-  if(__ARCH MATCHES ia32)
+-    append("-m32 -g" CMAKE_C_FLAGS)
+-    append("-m32 -g" CMAKE_CXX_FLAGS)
+-    append("-m32 -g" LINK_FLAGS)
+-  else ()
+-    append("-m64 -g" CMAKE_C_FLAGS)
+-    append("-m64 -g" CMAKE_CXX_FLAGS)
+-    append("-m64 -g" LINK_FLAGS)
+-  endif()
+-
+-  if(__ARCH MATCHES ia32)
+-    link_directories(/usr/lib)
+-  else()
+-    link_directories(/usr/lib64)
+-  endif()
+ elseif( Windows )
+   if( CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT )
+     set( CMAKE_INSTALL_PREFIX "C:/Program Files/mediasdk/" CACHE PATH "Install Path Prefix" FORCE )
