@@ -25,3 +25,15 @@ do_configure() {
     cd ${WORKDIR}/git
     perl ${WORKDIR}/git/tools/builder/build_mfx.pl --no-warn-as-error --cross=${WORKDIR}/toolchain.cmake --cmake=intel64.make.release
 }
+
+do_install_append() {
+    # We don't want to shit this with samples. It isn't needed.
+    rm "${D}/opt/intel/mediasdk/samples/libvpp_plugin.a"
+}
+
+PACKAGES =+ "${PN}-samples"
+
+FILES_${PN} += "/opt/intel/mediasdk/lib/*.so /opt/intel/mediasdk/plugins/*"
+FILES_${PN}-staticdev += "/opt/intel/mediasdk/lib/*.a"
+FILES_${PN}-samples += "/opt/intel/mediasdk/samples/*"
+FILES_${PN}-dev += "/opt/intel/mediasdk/include /opt/intel/mediasdk/lib/pkgconfig/*"
