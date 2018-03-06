@@ -15,9 +15,8 @@ S = "${WORKDIR}/git"
 
 DEPENDS += "wayland virtual/mesa libxrandr libxkbcommon msdk gstreamer1.0 gstreamer1.0-plugins-base libva libdrm gstreamer1.0-plugins-bad"
 
-export MFX_HOME = "${STAGING_DIR_HOST}/opt/intel/mediasdk"
+export MFX_HOME = "${STAGING_DIR_HOST}/usr"
 
-CFLAGS += "-I${STAGING_DIR_HOST}/opt/intel/mediasdk/include"
 EXTRA_OECMAKE = "-DCMAKE_INSTALL_PREFIX=${libdir}/gstreamer-1.0 -DWITH_WAYLAND=OFF -DWITH_X11=OFF"
 
 FILES_${PN} += "${libdir}/gstreamer-1.0"
