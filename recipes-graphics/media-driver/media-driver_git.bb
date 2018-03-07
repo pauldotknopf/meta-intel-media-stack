@@ -26,9 +26,6 @@ DEPENDS += "libva libpciaccess"
 
 inherit cmake pkgconfig
 
-# OECMAKE_C_FLAGS = "${HOST_CC_ARCH} ${TOOLCHAIN_OPTIONS} ${CFLAGS} -i/home/pknopf/git/x3/abrarecipes/build/tmp/work/corei7-64-poky-linux/media-driver/git-r0/recipe-sysroot/usr/include"
-# OECMAKE_CXX_FLAGS = "${HOST_CC_ARCH} ${TOOLCHAIN_OPTIONS} ${CXXFLAGS} -i/home/pknopf/git/x3/abrarecipes/build/tmp/work/corei7-64-poky-linux/media-driver/git-r0/recipe-sysroot/usr/include"
-
 EXTRA_OECMAKE += " \
 	  -DMEDIA_VERSION=2.0.0 \
       -DBUILD_ALONG_WITH_CMRTLIB=1 \
