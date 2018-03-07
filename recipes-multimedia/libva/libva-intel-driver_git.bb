@@ -13,9 +13,9 @@ COMPATIBLE_HOST = '(i.86|x86_64).*-linux'
 
 DEPENDS = "libva libdrm"
 
-SRC_URI = "git://github.com/intel/intel-vaapi-driver.git;protocol=https;tag=2.0.0"
-# 1.7.3 release tag
-#SRCREV = "${AUTOREV}"
+SRC_URI = "git://github.com/intel/intel-vaapi-driver.git;protocol=https;branch=v2.1-branch"
+SRCREV = "9f9ae52fc0176100957fa7e80f30e14687ad1b60"
+PV = "git${SRCPV}"
 
 S = "${WORKDIR}/git"
 

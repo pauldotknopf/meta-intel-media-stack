@@ -1,8 +1,8 @@
 diff --git a/Source/GmmLib/ULT/CMakeLists.txt b/Source/GmmLib/ULT/CMakeLists.txt
-index 10ab4ea..63505c2 100644
+index 10ab4ea..1e2f6c9 100644
 --- a/Source/GmmLib/ULT/CMakeLists.txt
 +++ b/Source/GmmLib/ULT/CMakeLists.txt
-@@ -122,14 +122,4 @@ else()
+@@ -122,14 +122,3 @@ else()
  	)
   endif()
  
@@ -16,4 +16,4 @@ index 10ab4ea..63505c2 100644
 -    )
 -
 -
- 
+-

@@ -10,8 +10,10 @@ LIC_FILES_CHKSUM = "file://LICENSE.md;md5=6aab5363823095ce682b155fef0231f0"
 SRC_URI = "git://github.com/intel/media-driver.git"
 SRCREV = "2eab2e248c5787ceaebd76be791e60e28e56fbf3"
 
-SRCREV_mediadriver ?= "2eab2e248c5787ceaebd76be791e60e28e56fbf3"
-SRCREV_gmmlib ?= "b1451bbe4c506f17ddc819f12b4b448fc08698c5"
+SRCREV_mediadriver ?= "29428e3223700b3348e2faccf0ea4047f4aab436"
+SRCREV_gmmlib ?= "b8d74ac3fcea0dffa901ce62399d43a937212074"
+SRCREV_FORMAT = "mediadriver"
+PV = "git${SRCPV}"
 
 SRC_URI = "git://github.com/intel/media-driver.git;name=mediadriver;destsuffix=media-driver \
            git://github.com/intel/gmmlib.git;name=gmmlib;destsuffix=gmmlib"

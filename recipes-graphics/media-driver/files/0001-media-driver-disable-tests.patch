@@ -1,17 +1,16 @@
 diff --git a/media_driver/linux/ult/CMakeLists.txt b/media_driver/linux/ult/CMakeLists.txt
-index 3e05ec7..50c600a 100644
+index 1379a6c..eacd7a7 100644
 --- a/media_driver/linux/ult/CMakeLists.txt
 +++ b/media_driver/linux/ult/CMakeLists.txt
-@@ -36,13 +36,3 @@ else()
-         include_directories(BEFORE ${LIBVA_INCLUDE_DIRS})
+@@ -39,12 +39,3 @@ else()
      endif()
  endif()
--
+ 
 -ADD_SUBDIRECTORY(libdrm_mock)
 -ADD_SUBDIRECTORY(ult_app)
 -
 -enable_testing()  
--ADD_TEST(NAME test_devult COMMAND drvult ${UMD_PATH})   
+-ADD_TEST(NAME test_devult COMMAND devult ${UMD_PATH})   
 -SET_TESTS_PROPERTIES(test_devult  
 -    PROPERTIES PASS_REGULAR_EXPRESSION "PASS")  
 -SET_TESTS_PROPERTIES(test_devult  
