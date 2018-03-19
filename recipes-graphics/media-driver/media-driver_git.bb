@@ -26,15 +26,18 @@ S = "${WORKDIR}/media-driver"
 
 DEPENDS += "libva libpciaccess"
 
-inherit cmake pkgconfig
+inherit cmake
 
 EXTRA_OECMAKE += " \
-	  -DMEDIA_VERSION=2.0.0 \
-      -DBUILD_ALONG_WITH_CMRTLIB=1 \
-      -DBS_DIR_GMMLIB=`pwd`/../gmmlib/Source/GmmLib/ \
-      -DBS_DIR_COMMON=`pwd`/../gmmlib/Source/Common/ \
-      -DBS_DIR_INC=`pwd`/../gmmlib/Source/inc/ \
-      -DBS_DIR_MEDIA=`pwd`/../media-driver \
+	-DCMAKE_INSTALL_PREFIX=${D}/usr
+	-DMEDIA_VERSION=2.0.0 \
+      	-DBUILD_ALONG_WITH_CMRTLIB=1 \
+      	-DBS_DIR_GMMLIB=${S}/gmmlib/Source/GmmLib/ \
+      	-DBS_DIR_COMMON=${S}/gmmlib/Source/Common/ \
+      	-DBS_DIR_INC=${S}/gmmlib/Source/inc/ \
+      	-DBS_DIR_MEDIA=${S}/media-driver \
+	-DINSTALL_DRIVER_SYSCONF=OFF \
+	-DCMAKE_INSTALL_LIBDIR=${libdir} \
         "
 
 do_patch() {
@@ -46,9 +49,9 @@ do_patch() {
 
 do_install_append() {
     install -d ${D}${sysconfdir}/systemd/system.conf.d/
-    install -m 0755 ${WORKDIR}/vaapi-env.conf ${D}${sysconfdir}/systemd/system.conf.d/
+    install -m 0444 ${WORKDIR}/vaapi-env.conf ${D}${sysconfdir}/systemd/system.conf.d/
 }
 
-FILES_${PN} += "${libdir} ${libdir}/dir"
+FILES_${PN} += "${libdir} ${libdir}/dri"
 
 INSANE_SKIP_${PN} = "ldflags package_qa_hash_style already-stripped"
