@@ -4,7 +4,7 @@ LIC_FILES_CHKSUM = "file://COPYING.LIB;md5=4fbd65380cdd255951079008b364516c"
 
 SRC_URI = "git://github.com/ishmael1985/gstreamer-media-SDK.git;protocol=https;branch=master"
 
-SRCREV = "2b1a65d3287481bede34e85dbfd805e6fac039fa"
+SRCREV = "6cef536ad3401c44805edb7dcbeb6e88f3c6c389"
 PV = "git${SRCPV}"
 
 #SRC_URI += "file://0001-fix-lib-paths-for-mfx.patch"
