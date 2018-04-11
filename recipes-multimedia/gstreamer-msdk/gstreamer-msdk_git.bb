@@ -2,7 +2,7 @@ SUMMARY = "Intel Media SDK gstreamer plugin"
 LICENSE = "LGPLv2.1+"
 LIC_FILES_CHKSUM = "file://COPYING.LIB;md5=4fbd65380cdd255951079008b364516c"
 
-SRC_URI = "git://github.com/ishmael1985/gstreamer-media-SDK.git;protocol=https;branch=master"
+SRC_URI = "git://github.com/pauldotknopf/gstreamer-media-SDK.git;protocol=https;branch=old-master"
 
 SRCREV = "6cef536ad3401c44805edb7dcbeb6e88f3c6c389"
 PV = "git${SRCPV}"
