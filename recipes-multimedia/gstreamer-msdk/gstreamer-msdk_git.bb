@@ -2,9 +2,9 @@ SUMMARY = "Intel Media SDK gstreamer plugin"
 LICENSE = "LGPLv2.1+"
 LIC_FILES_CHKSUM = "file://COPYING.LIB;md5=4fbd65380cdd255951079008b364516c"
 
-SRC_URI = "git://github.com/pauldotknopf/gstreamer-media-SDK.git;protocol=https;branch=old-master"
+SRC_URI = "git://github.com/pauldotknopf/gstreamer-media-SDK.git;protocol=https;branch=master"
 
-SRCREV = "6cef536ad3401c44805edb7dcbeb6e88f3c6c389"
+SRCREV = "ed7ececefb5bcf1be32d280fe7e6a83a7e481bf0"
 PV = "git${SRCPV}"
 
 #SRC_URI += "file://0001-fix-lib-paths-for-mfx.patch"
