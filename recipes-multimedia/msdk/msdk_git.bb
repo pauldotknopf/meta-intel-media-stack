@@ -2,13 +2,8 @@ SUMMARY = "Intel Media SDK samples and binaries"
 LICENSE = "Proprietary"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=3cb331af679cd8f968bf799a9c55b46e"
 
-SRC_URI = "git://github.com/Intel-Media-SDK/MediaSDK.git"
-SRCREV = "e54022c1dbdcbd93b502f0da37352c9e9d103180"
-
-SRC_URI += "file://0001-dont-override-cross-compile-flags.patch"
-SRC_URI += "file://0002-dont-build-samples.patch"
-SRC_URI += "file://0003-dont-override-cross-compile-flags.patch"
-SRC_URI += "file://0004-add-libs-to-pkgconfig.patch"
+SRC_URI = "git://github.com/MedXChange/MediaSDK.git"
+SRCREV = "1ced846999c001b90a3af477710460e5425e5be7"
 
 DEPENDS += "libva media-driver gcc-runtime"
 
@@ -29,10 +24,7 @@ do_configure() {
 
 do_install_append() {
     rm ${D}/usr/samples/libvpp_plugin.a
-    cp ${D}${libdir}/pkgconfig/mfx.pc ${D}${libdir}/pkgconfig/libmfx.pc
     install -d ${D}${includedir}/mfx
-    file ${D}${includedir}
-    ls ${D}${includedir}/*
     cp ${D}${includedir}/*.h ${D}${includedir}/mfx
 }
 

@@ -8,9 +8,9 @@ LICENSE = "Intel"
 LIC_FILES_CHKSUM = "file://LICENSE.md;md5=6aab5363823095ce682b155fef0231f0"
 
 SRC_URI = "git://github.com/intel/media-driver.git"
-SRCREV = "2eab2e248c5787ceaebd76be791e60e28e56fbf3"
+SRCREV = "ab264dd51f20ea83d6c40a886fb685ce372c47ba"
 
-SRCREV_mediadriver ?= "29428e3223700b3348e2faccf0ea4047f4aab436"
+SRCREV_mediadriver ?= "ab264dd51f20ea83d6c40a886fb685ce372c47ba"
 SRCREV_gmmlib ?= "b8d74ac3fcea0dffa901ce62399d43a937212074"
 SRCREV_FORMAT = "mediadriver"
 PV = "git${SRCPV}"
@@ -31,17 +31,17 @@ inherit cmake pkgconfig
 EXTRA_OECMAKE += " \
 	  -DMEDIA_VERSION=2.0.0 \
       -DBUILD_ALONG_WITH_CMRTLIB=1 \
-      -DBS_DIR_GMMLIB=`pwd`/../gmmlib/Source/GmmLib/ \
-      -DBS_DIR_COMMON=`pwd`/../gmmlib/Source/Common/ \
-      -DBS_DIR_INC=`pwd`/../gmmlib/Source/inc/ \
-      -DBS_DIR_MEDIA=`pwd`/../media-driver \
+      -DBS_DIR_GMMLIB=${WORKDIR}/gmmlib/Source/GmmLib/ \
+      -DBS_DIR_COMMON=${WORKDIR}/gmmlib/Source/Common/ \
+      -DBS_DIR_INC=${WORKDIR}/gmmlib/Source/inc/ \
+      -DBS_DIR_MEDIA=${WORKDIR}/media-driver \
         "
 
 do_patch() {
-    cd media-driver
-    patch -p1 < ${WORKDIR}/0001-media-driver-disable-tests.patch
-    cd ../gmmlib
-    patch -p1 < ${WORKDIR}/0002-gmmlib-disable-tests.patch
+    cd media-driver 
+    patch -p1 < ${WORKDIR}/0001-media-driver-disable-tests.patch 
+    cd ../gmmlib 
+    patch -p1 < ${WORKDIR}/0002-gmmlib-disable-tests.patch 
 }
 
 do_install_append() {
