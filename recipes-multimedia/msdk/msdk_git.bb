@@ -10,17 +10,10 @@ DEPENDS += "libva media-driver gcc-runtime"
 inherit cmake pkgconfig perlnative
 
 S = "${WORKDIR}/git"
-B = "${WORKDIR}/git/__cmake/intel64.make.release"
-
 
 OECMAKE_EXTRA_ROOT_PATH += "${WORKDIR}/git"
 CFLAGS += "-fPIC"
 CXXFLAGS += "-fPIC"
-
-do_configure() {
-    cd ${WORKDIR}/git
-    perl ${WORKDIR}/git/tools/builder/build_mfx.pl --no-warn-as-error --cross=${WORKDIR}/toolchain.cmake --cmake=intel64.make.release --prefix /usr
-}
 
 do_install_append() {
     rm ${D}/usr/samples/libvpp_plugin.a
@@ -31,10 +24,8 @@ do_install_append() {
 PACKAGES =+ "${PN}-samples"
 
 FILES_${PN} += "/usr/lib/*.so /usr/plugins/*"
-#FILES_${PN}-staticdev += "/opt/intel/mediasdk/lib/*.a"
 FILES_${PN}-samples += "/usr/samples/*"
 FILES_${PN}-dev = "${includedir}/* ${libdir}/pkgconfig/*"
-#FILES_${PN}-dev += "/opt/intel/mediasdk/include /opt/intel/mediasdk/lib/pkgconfig/*"
 
 SYSROOT_PREPROCESS_FUNCS += "msdk_populate_sysroot"
 msdk_populate_sysroot() {
