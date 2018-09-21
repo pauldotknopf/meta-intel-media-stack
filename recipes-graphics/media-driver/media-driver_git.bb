@@ -10,16 +10,16 @@ LIC_FILES_CHKSUM = "file://LICENSE.md;md5=6aab5363823095ce682b155fef0231f0"
 SRC_URI = "git://github.com/intel/media-driver.git"
 SRCREV = "ab264dd51f20ea83d6c40a886fb685ce372c47ba"
 
-SRCREV_mediadriver ?= "ab264dd51f20ea83d6c40a886fb685ce372c47ba"
-SRCREV_gmmlib ?= "b8d74ac3fcea0dffa901ce62399d43a937212074"
+SRCREV_mediadriver ?= "6819999ba209fab2e02c3d66a3d443e0164a7f66"
+SRCREV_gmmlib ?= "5b61c8a6b1882e4f83d339be6944dc1d434f3fa9"
 SRCREV_FORMAT = "mediadriver"
 PV = "git${SRCPV}"
 
 SRC_URI = "git://github.com/intel/media-driver.git;name=mediadriver;destsuffix=media-driver \
            git://github.com/intel/gmmlib.git;name=gmmlib;destsuffix=gmmlib"
 
-SRC_URI += "file://0001-media-driver-disable-tests.patch"
-SRC_URI += "file://0002-gmmlib-disable-tests.patch"
+#SRC_URI += "file://0001-media-driver-disable-tests.patch"
+#SRC_URI += "file://0002-gmmlib-disable-tests.patch"
 SRC_URI += "file://vaapi-env.conf"
 
 S = "${WORKDIR}/media-driver"
@@ -37,12 +37,6 @@ EXTRA_OECMAKE += " \
       -DBS_DIR_MEDIA=${WORKDIR}/media-driver \
         "
 
-do_patch() {
-    cd media-driver 
-    patch -p1 < ${WORKDIR}/0001-media-driver-disable-tests.patch 
-    cd ../gmmlib 
-    patch -p1 < ${WORKDIR}/0002-gmmlib-disable-tests.patch 
-}
 
 do_install_append() {
     install -d ${D}${sysconfdir}/systemd/system.conf.d/

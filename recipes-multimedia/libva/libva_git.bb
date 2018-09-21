@@ -18,7 +18,7 @@ LICENSE = "Intel"
 LIC_FILES_CHKSUM = "file://autogen.sh;md5=9a10774d841b6065ae30d3940e0ce45d;beginline=2;endline=21"
 
 SRC_URI = "git://github.com/intel/libva.git;branch=master"
-SRCREV = "d6fd111e2062bb4732db8a05ed55fc01771087b4"
+SRCREV = "250b3dc8f370bc6d85be767c9722fd98e8b02ebb"
 PV = "git${SRCPV}"
 
 S = "${WORKDIR}/git"
