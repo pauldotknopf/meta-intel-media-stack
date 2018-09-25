@@ -11,6 +11,11 @@ DEPENDS += "libva media-driver gcc-runtime"
 
 inherit cmake pkgconfig
 
-EXTRA_OECMAKE += " \
-      -DDCMAKE_MFX_HOME=${S}/api \
-    "
+do_configure_prepend() {
+  export MFX_HOME=${S}/api/include
+}
+
+EXTRA_OECMAKE += "-DBUILD_SAMPLES=OFF"
+OECMAKE_EXTRA_ROOT_PATH ?= "${S}/api"
+
+FILES_${PN} += "/usr/lib/*.so /usr/lib/mfx/*.so /usr/lib/mfx/*.cfg"
