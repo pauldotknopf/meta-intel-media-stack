@@ -15,7 +15,13 @@ do_configure_prepend() {
   export MFX_HOME=${S}/api/include
 }
 
-EXTRA_OECMAKE += "-DBUILD_SAMPLES=OFF"
+do_install_append() {
+  rm ${D}/usr/share/mfx/samples/libvpp_plugin.a
+}
+
 OECMAKE_EXTRA_ROOT_PATH = "${S}/api"
 
+PACKAGES =+ "${PN}-samples"
+
 FILES_${PN} += "/usr/lib/*.so /usr/lib/mfx/*.so /usr/lib/mfx/*.cfg"
+FILES_${PN}-samples += "/usr/share/mfx/samples/*"
