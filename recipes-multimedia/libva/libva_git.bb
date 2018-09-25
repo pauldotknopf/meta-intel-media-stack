@@ -14,7 +14,7 @@ HOMEPAGE = "https://github.com/intel/libva"
 BUGTRACKER = "https://github.com/intel/libva/issues"
 
 SECTION = "x11"
-LICENSE = "Intel"
+LICENSE = "Proprietary"
 LIC_FILES_CHKSUM = "file://autogen.sh;md5=9a10774d841b6065ae30d3940e0ce45d;beginline=2;endline=21"
 
 SRC_URI = "git://github.com/intel/libva.git;branch=master"

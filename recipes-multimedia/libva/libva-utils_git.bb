@@ -2,11 +2,11 @@
 SUMMARY = "Video Acceleration (VA) API tests for Linux"
 
 SECTION = "x11"
-LICENSE = "Intel"
+LICENSE = "Proprietary"
 LIC_FILES_CHKSUM = "file://Makefile.am;md5=87d7f9d5da59c9b214c6a47b728725e4;beginline=1;endline=21"
 
 SRC_URI = "git://github.com/intel/libva-utils.git;branch=master"
-SRCREV = "5b10b3302502212dbf6d0710e10e2015b1e192f6"
+SRCREV = "a8a9d73dad32a9a595080f5bf568127d4408d260"
 PV = "git${SRCPV}"
 
 S = "${WORKDIR}/git"
