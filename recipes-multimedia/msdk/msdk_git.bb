@@ -16,6 +16,6 @@ do_configure_prepend() {
 }
 
 EXTRA_OECMAKE += "-DBUILD_SAMPLES=OFF"
-OECMAKE_EXTRA_ROOT_PATH ?= "${S}/api"
+OECMAKE_EXTRA_ROOT_PATH = "${S}/api"
 
 FILES_${PN} += "/usr/lib/*.so /usr/lib/mfx/*.so /usr/lib/mfx/*.cfg"
