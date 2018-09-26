@@ -17,6 +17,8 @@ do_configure_prepend() {
 
 do_install_append() {
   rm ${D}/usr/share/mfx/samples/libvpp_plugin.a
+  # See here: https://github.com/Intel-Media-SDK/MediaSDK/issues/671
+  ln -s libmfxhw64.so.1.28 ${D}/usr/lib/libmfxhw64-p.so.1.28
 }
 
 OECMAKE_EXTRA_ROOT_PATH = "${S}/api"
